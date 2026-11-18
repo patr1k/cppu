@@ -38,9 +38,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         return 1;
     }
 
-    // 8 KiB of VRAM (0x8000-0x9FFF), owned by the host.
-    std::array<std::uint8_t, 0x2000> vram{};
-    cppu::PPU ppu(vram.data());
+    cppu::PPU ppu{};
 
     std::array<std::uint32_t, cppu::kScreenWidth * cppu::kScreenHeight> pixels{};
 

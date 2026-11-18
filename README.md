@@ -2,16 +2,16 @@
 
 A standalone emulator for the **Game Boy (DMG) Picture Processing Unit**, written in C++20.
 
-cppu emulates only the PPU, not a whole Game Boy. It builds as a library that you can drop into a full Game Boy emulator or into a custom project that just needs Game Boy-style graphics. The host program owns the memory and drives the clock; cppu turns that memory into pixels.
+cppu emulates only the PPU, not a whole Game Boy. It builds as a library that you can drop into a full Game Boy emulator or into a custom project that just needs Game Boy-style graphics. The PPU owns its VRAM, OAM and LCD registers. The host program drives the clock and connects those to its own memory map.
 
 A small SDL2 frontend is included for viewing the output while developing.
 
-> **Status:** early scaffolding. The public API is a stub, and the PPU itself hasn't been written yet.
+> **Status:** early development. The memory and register interface is in place, but rendering (`tick()`) hasn't been written yet, and `take_interrupts()` and `frame_ready()` are declared but not yet implemented.
 
 ## Goals
 
 - **Accurate at the dot level.** `tick()` advances the PPU by one master clock cycle (one "dot"), so the mode timing (OAM scan → drawing → HBlank → VBlank) can be modeled faithfully.
-- **Host-owned memory.** The caller passes in a pointer to VRAM, and the PPU never allocates or frees it.
+- **Knows nothing about the bus.** The PPU has no idea where its memory and registers are mapped. VRAM and OAM are accessed by offset and registers by name, and the host translates its own addresses.
 - **No dependencies in the library.** SDL2 is only used by the frontend.
 - **Room to grow.** A Game Boy Color mode may be added later behind a flag.
 
@@ -55,20 +55,116 @@ add_subdirectory(external/cppu)   # frontend is off automatically when cppu is a
 target_link_libraries(my_emulator PRIVATE cppu::cppu)
 ```
 
+Everything lives in `namespace cppu` and comes from a single header, `<cppu/ppu.hpp>`.
+
+### Connecting the PPU to your memory map
+
+cppu doesn't decode bus addresses. Your memory map sends the PPU's ranges to the matching calls. On a standard DMG memory map that looks like this:
+
 ```cpp
 #include <cppu/ppu.hpp>
 
-std::array<std::uint8_t, 0x2000> vram{};   // 0x8000–0x9FFF
-cppu::PPU ppu(vram.data());
+cppu::PPU ppu;   // owns 8 KiB VRAM, 160 B OAM and the LCD registers
 
+std::uint8_t bus_read(std::uint16_t addr) {
+    if (addr >= 0x8000 && addr <= 0x9FFF)
+        return ppu.read_vram(addr - 0x8000);
+    if (addr >= 0xFE00 && addr <= 0xFE9F)
+        return ppu.read_oam(static_cast<std::uint8_t>(addr - 0xFE00));
+    if (addr >= 0xFF40 && addr <= 0xFF4B)
+        return ppu.read_register(static_cast<cppu::Reg>(addr - 0xFF40));
+    // ...the rest of your memory map
+}
+
+// bus_write() mirrors this with write_vram / write_oam / write_register.
+```
+
+### Driving the clock
+
+```cpp
 // Call once per master clock cycle (4.194304 MHz).
 ppu.tick();
 
-// One byte per pixel, holding a shade from 0 to 3, size 160×144.
-const std::uint8_t* pixels = ppu.framebuffer();
+// VBlank / STAT interrupts raised since the last call.   [not yet implemented]
+if_register |= ppu.take_interrupts();
+
+// True once per frame, at the start of VBlank.            [not yet implemented]
+if (ppu.frame_ready()) {
+    // One byte per pixel, shade 0 (lightest) to 3 (darkest),
+    // row-major, kScreenWidth × kScreenHeight (160 × 144).
+    const std::uint8_t* pixels = ppu.framebuffer();
+}
 ```
 
-The API is expected to change as the PPU takes shape. Open questions include how the host exposes OAM and the LCD registers (LCDC, STAT, SCY/SCX, LY/LYC, BGP/OBP0/OBP1, WY/WX) and how the PPU signals VBlank and STAT interrupts back to the CPU.
+## API reference
+
+### `cppu::PPU`
+
+| Member | Description |
+|---|---|
+| `PPU()` | Creates a PPU with VRAM, OAM and all registers zeroed. |
+| `void tick()` | Advances the PPU by one dot (one master clock cycle). *Currently a stub.* |
+| `std::uint8_t read_vram(std::uint16_t offset) const` | Reads VRAM at `offset` (0x0000–0x1FFF). Out-of-range offsets return 0xFF. |
+| `void write_vram(std::uint16_t offset, std::uint8_t value)` | Writes VRAM. Out-of-range writes are ignored. |
+| `std::uint8_t read_oam(std::uint8_t offset) const` | Reads OAM at `offset` (0x00–0x9F). Out-of-range offsets return 0xFF. |
+| `void write_oam(std::uint8_t offset, std::uint8_t value)` | Writes OAM. Out-of-range writes are ignored. Also the entry point for a host-driven OAM DMA transfer. |
+| `std::uint8_t read_register(Reg reg) const` | Reads an LCD register (see below). |
+| `void write_register(Reg reg, std::uint8_t value)` | Writes an LCD register (see below). |
+| `std::uint8_t take_interrupts()` | Returns the interrupts raised since the last call as `kIntVBlank \| kIntStat` bits, then clears them. OR the result into your IF register. *Not yet implemented.* |
+| `bool frame_ready()` | Returns `true` once per frame, at the start of VBlank. *Not yet implemented.* |
+| `const std::uint8_t* framebuffer() const` | The current output image (see [Driving the clock](#driving-the-clock)). |
+
+VRAM and OAM are not yet locked during modes 2 and 3. For now, CPU access always succeeds.
+
+### Registers: `cppu::Reg`
+
+Each enumerator's value is the register's offset from 0xFF40, so a host with the standard memory map can convert with `static_cast<cppu::Reg>(addr - 0xFF40)`.
+
+| `Reg` | DMG address | Read | Write |
+|---|---|---|---|
+| `LCDC` | 0xFF40 | value | stored as-is |
+| `STAT` | 0xFF41 | bit 7 reads 1; bit 2 reflects LY == LYC | only bits 3–6 (interrupt selects) are writable |
+| `SCY`, `SCX` | 0xFF42–43 | value | stored as-is |
+| `LY` | 0xFF44 | current scanline | ignored (read-only) |
+| `LYC` | 0xFF45 | value | stored as-is |
+| `DMA` | 0xFF46 | 0xFF | ignored. The host performs OAM DMA itself through `write_oam` |
+| `BGP`, `OBP0`, `OBP1` | 0xFF47–49 | value | stored as-is |
+| `WY`, `WX` | 0xFF4A–4B | value | stored as-is |
+
+### Register bit masks
+
+For decoding register values, e.g. in a debugger:
+
+| Constant | Bit | Meaning |
+|---|---|---|
+| `lcdc::kEnable` | 7 | LCD and PPU on |
+| `lcdc::kWndTileMap` | 6 | Window tile map: 0 = VRAM+0x1800, 1 = VRAM+0x1C00 |
+| `lcdc::kWndEnable` | 5 | Window on |
+| `lcdc::kBgWndTileData` | 4 | BG/window tile data: 0 = VRAM+0x0800 (signed), 1 = VRAM+0x0000 (unsigned) |
+| `lcdc::kBgTileMap` | 3 | BG tile map: 0 = VRAM+0x1800, 1 = VRAM+0x1C00 |
+| `lcdc::kObjSize` | 2 | Objects: 0 = 8×8, 1 = 8×16 |
+| `lcdc::kObjEnable` | 1 | Objects on |
+| `lcdc::kBgWndEnable` | 0 | BG and window on |
+| `stat::kLycIntSelect` | 6 | STAT interrupt on LY == LYC |
+| `stat::kMode2IntSelect` | 5 | STAT interrupt on mode 2 |
+| `stat::kMode1IntSelect` | 4 | STAT interrupt on mode 1 |
+| `stat::kMode0IntSelect` | 3 | STAT interrupt on mode 0 |
+| `stat::kLycEqualsLy` | 2 | LY == LYC (read-only) |
+| `stat::kModeMask` | 1–0 | Current PPU mode (read-only) |
+
+`PPU` also has convenience getters that return these bits already decoded: `lcdc_enable()`, `lcdc_wnd_enable()`, `lcdc_tile_map_area()` (window tile map), `lcdc_bg_wnd_tile_data_area()`, `lcdc_bg_tile_map_area()`, `lcdc_obj_size()`, `lcdc_obj_enable()`, `lcdc_bg_wnd_enable()`, `stat_int_mode_0()`, `stat_int_mode_1()`, `stat_int_mode_2()`, `stat_int_mode_lyc()`, `stat_lyc()` and `stat_ppu_mode()` (returns 0–3).
+
+### Constants
+
+| Constant | Value | |
+|---|---|---|
+| `kScreenWidth`, `kScreenHeight` | 160, 144 | Framebuffer size in pixels |
+| `kDotsPerLine` | 456 | |
+| `kLinesPerFrame` | 154 | |
+| `kDotsPerFrame` | 70,224 | `tick()` calls per frame |
+| `kIntVBlank`, `kIntStat` | 0x01, 0x02 | Bits returned by `take_interrupts()`, in IF-register order |
+
+The API may still change as the PPU takes shape.
 
 ## Timing reference (DMG)
 
