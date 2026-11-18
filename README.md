@@ -6,7 +6,14 @@ cppu emulates only the PPU, not a whole Game Boy. It builds as a library that yo
 
 A small SDL2 frontend is included for viewing the output while developing.
 
-> **Status:** early development. The memory and register interface is in place, but rendering (`tick()`) hasn't been written yet, and `take_interrupts()` and `frame_ready()` are declared but not yet implemented.
+> **Status:** early development. Working so far:
+>
+> - the memory and register interface
+> - the mode timing, with LY advancing through OAM scan → drawing → HBlank on each visible line and VBlank on lines 144–153
+> - VBlank and STAT interrupts
+> - turning the LCD on and off
+>
+> Rendering isn't written yet. The pixel FIFOs exist, but there's no tile fetcher, so the framebuffer stays blank. Mode 3 uses a placeholder length of 160 dots, and OAM scan doesn't select objects yet.
 
 ## Goals
 
@@ -85,10 +92,10 @@ std::uint8_t bus_read(std::uint16_t addr) {
 // Call once per master clock cycle (4.194304 MHz).
 ppu.tick();
 
-// VBlank / STAT interrupts raised since the last call.   [not yet implemented]
+// VBlank / STAT interrupts raised since the last call.
 if_register |= ppu.take_interrupts();
 
-// True once per frame, at the start of VBlank.            [not yet implemented]
+// True once per frame, at the start of VBlank.
 if (ppu.frame_ready()) {
     // One byte per pixel, shade 0 (lightest) to 3 (darkest),
     // row-major, kScreenWidth × kScreenHeight (160 × 144).
@@ -96,22 +103,24 @@ if (ppu.frame_ready()) {
 }
 ```
 
+The PPU starts with the LCD off (LCDC = 0), and `tick()` does nothing until LCDC bit 7 is set. On real hardware the boot ROM sets LCDC to 0x91. If your host skips the boot ROM, write that value yourself.
+
 ## API reference
 
 ### `cppu::PPU`
 
 | Member | Description |
 |---|---|
-| `PPU()` | Creates a PPU with VRAM, OAM and all registers zeroed. |
-| `void tick()` | Advances the PPU by one dot (one master clock cycle). *Currently a stub.* |
+| `PPU()` | Creates a PPU with VRAM, OAM and all registers zeroed, except that the STAT mode bits start at 2 (OAM scan). |
+| `void tick()` | Advances the PPU by one dot (one master clock cycle) and handles mode changes, LY and interrupts. Does nothing while the LCD is off. *Pixel output isn't implemented yet.* |
 | `std::uint8_t read_vram(std::uint16_t offset) const` | Reads VRAM at `offset` (0x0000–0x1FFF). Out-of-range offsets return 0xFF. |
 | `void write_vram(std::uint16_t offset, std::uint8_t value)` | Writes VRAM. Out-of-range writes are ignored. |
 | `std::uint8_t read_oam(std::uint8_t offset) const` | Reads OAM at `offset` (0x00–0x9F). Out-of-range offsets return 0xFF. |
 | `void write_oam(std::uint8_t offset, std::uint8_t value)` | Writes OAM. Out-of-range writes are ignored. Also the entry point for a host-driven OAM DMA transfer. |
 | `std::uint8_t read_register(Reg reg) const` | Reads an LCD register (see below). |
 | `void write_register(Reg reg, std::uint8_t value)` | Writes an LCD register (see below). |
-| `std::uint8_t take_interrupts()` | Returns the interrupts raised since the last call as `kIntVBlank \| kIntStat` bits, then clears them. OR the result into your IF register. *Not yet implemented.* |
-| `bool frame_ready()` | Returns `true` once per frame, at the start of VBlank. *Not yet implemented.* |
+| `std::uint8_t take_interrupts()` | Returns the interrupts raised since the last call as `kIntVBlank \| kIntStat` bits, then clears them. OR the result into your IF register. The STAT interrupt fires only on a rising edge of the combined STAT condition, as on hardware. |
+| `bool frame_ready()` | Returns `true` once per frame, after VBlank begins, then `false` until the next VBlank. |
 | `const std::uint8_t* framebuffer() const` | The current output image (see [Driving the clock](#driving-the-clock)). |
 
 VRAM and OAM are not yet locked during modes 2 and 3. For now, CPU access always succeeds.
@@ -122,7 +131,7 @@ Each enumerator's value is the register's offset from 0xFF40, so a host with the
 
 | `Reg` | DMG address | Read | Write |
 |---|---|---|---|
-| `LCDC` | 0xFF40 | value | stored as-is |
+| `LCDC` | 0xFF40 | value | stored as-is. Clearing bit 7 resets LY to 0 and the mode to 0. Setting it starts a new frame at line 0 |
 | `STAT` | 0xFF41 | bit 7 reads 1; bit 2 reflects LY == LYC | only bits 3–6 (interrupt selects) are writable |
 | `SCY`, `SCX` | 0xFF42–43 | value | stored as-is |
 | `LY` | 0xFF44 | current scanline | ignored (read-only) |
@@ -162,6 +171,7 @@ For decoding register values, e.g. in a debugger:
 | `kDotsPerLine` | 456 | |
 | `kLinesPerFrame` | 154 | |
 | `kDotsPerFrame` | 70,224 | `tick()` calls per frame |
+| `kOamScanDots` | 80 | Length of mode 2 (OAM scan) |
 | `kIntVBlank`, `kIntStat` | 0x01, 0x02 | Bits returned by `take_interrupts()`, in IF-register order |
 
 The API may still change as the PPU takes shape.

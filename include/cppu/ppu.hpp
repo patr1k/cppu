@@ -3,6 +3,8 @@
 #include <array>
 #include <cstdint>
 
+#include "cppu/fifo.hpp"
+
 namespace cppu {
 
 enum class Reg : std::uint8_t {
@@ -77,7 +79,7 @@ public:
 
     // Interrupts raised since the last call (kIntVBlank | kIntStat).
     // The host ORs the result into its IF register.
-    uint8_t take_interrupts();
+    std::uint8_t take_interrupts();
 
     // Output image: one byte per pixel, holding a shade 0-3
     // (0 = lightest, 3 = darkest). Row-major, kScreenWidth * kScreenHeight.
@@ -100,7 +102,7 @@ public:
     bool stat_int_mode_2() const;
     bool stat_int_mode_lyc() const;
     bool stat_lyc() const;
-    uint8_t stat_ppu_mode() const;
+    std::uint8_t stat_ppu_mode() const;
 
 private:
     // Values of STAT bits 1-0.
@@ -120,6 +122,8 @@ private:
 
     // Called after the last dot of a line: advances LY, picks the next mode.
     void end_line();
+
+    void update_stat_line();
 
     std::array<std::uint8_t, kScreenWidth * kScreenHeight> framebuffer_{};
 
@@ -159,6 +163,19 @@ private:
     
     // X position of the pixel being drawn in mode 3
     std::uint8_t mode3_x_ = 0;
+
+    // Pending interrupts (kIntVBlank | kIntStat)
+    std::uint8_t pending_interrupts_ = 0;
+
+    // STAT interrupt line state (true = high, false = low). Edge-triggered.
+    bool stat_line_ = false;
+
+    // True once per frame (at the start of VBlank)
+    bool frame_ready_ = false;
+
+    // Pixel FIFOs for mode 3 drawing. The fetcher fills these with pixels to be drawn.
+    PixelFifo obj_fifo_{};
+    PixelFifo bg_fifo_{};
 };
 
 } // namespace cppu

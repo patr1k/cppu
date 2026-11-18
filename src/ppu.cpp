@@ -1,9 +1,12 @@
+#include <utility>
 #include "cppu/ppu.hpp"
 
 namespace cppu {
 
 void PPU::tick() {
-    // TODO: when LCDC bit 7 is clear the PPU is off: LY stays 0, mode 0.
+    if (!lcdc_enable()) {
+        return;
+    }
 
     // 1. Do this dot's work for the current mode.
     switch (mode()) {
@@ -31,11 +34,14 @@ void PPU::end_line() {
 
     if (ly_ < kScreenHeight) {
         set_mode(Mode::OamScan);         // next visible line (incl. wrap to 0)
+        frame_ready_ = false;
     } else if (ly_ == kScreenHeight) {
         set_mode(Mode::VBlank);          // lines 144-153
-        // TODO: raise kIntVBlank, mark frame_ready
+        frame_ready_ = true;
+        pending_interrupts_ |= kIntVBlank;
     }
-    // TODO: LY == LYC coincidence check / STAT interrupt
+
+    update_stat_line();
 }
 
 void PPU::set_mode(Mode mode) {
@@ -47,13 +53,16 @@ void PPU::set_mode(Mode mode) {
             break;
         case Mode::Drawing:
             mode3_x_ = 0;
-            // TODO: reset fetcher and pixel FIFOs
+            bg_fifo_.clear();
+            obj_fifo_.clear();
+            // TODO: reset fetcher
             break;
         case Mode::HBlank:
         case Mode::VBlank:
             break;
     }
-    // TODO: STAT interrupt line (mode 0/1/2 selects) is edge-triggered
+
+    update_stat_line();
 }
 
 void PPU::tick_oam_scan() {
@@ -124,16 +133,29 @@ std::uint8_t PPU::read_register(Reg reg) const {
 
 void PPU::write_register(Reg reg, std::uint8_t value) {
     switch (reg) {
-        case Reg::LCDC: lcdc_ = value; break;
+        case Reg::LCDC:
+            const bool was_on = lcdc_enable();
+            lcdc_ = value;
+            if (was_on && !lcdc_enable()) {
+                ly_ = 0; dots_ = 0;
+                set_mode(Mode::HBlank);
+            } else if (!was_on && lcdc_enable()) {
+                set_mode(Mode::OamScan);
+            }
+            break;
         case Reg::STAT: {
             std::uint8_t v = stat_ & stat::kModeMask;
             v |= value & (stat::kMode0IntSelect | stat::kMode1IntSelect | stat::kMode2IntSelect | stat::kLycIntSelect);
             stat_ = v;
+            update_stat_line();
             break;
         }
         case Reg::SCY:  scy_ = value; break;
         case Reg::SCX:  scx_ = value; break;
-        case Reg::LYC:  lyc_ = value; break;
+        case Reg::LYC:
+            lyc_ = value;
+            update_stat_line();
+            break;
         case Reg::BGP:  bgp_ = value; break;
         case Reg::OBP0: obp0_ = value; break;
         case Reg::OBP1: obp1_ = value; break;
@@ -145,58 +167,54 @@ void PPU::write_register(Reg reg, std::uint8_t value) {
     }
 }
 
+void PPU::update_stat_line() {
+    const auto m = mode();
+    const bool line =
+        (stat_int_mode_0() && m == Mode::HBlank) ||
+        (stat_int_mode_1() && m == Mode::VBlank) ||
+        (stat_int_mode_2() && m == Mode::OamScan) ||
+        (stat_int_mode_lyc() && stat_lyc());
+    if (line && !stat_line_) pending_interrupts_ |= kIntStat;
+    stat_line_ = line;
+}
+
+std::uint8_t PPU::take_interrupts() {
+    return std::exchange(pending_interrupts_, 0);
+}
+
+bool PPU::frame_ready() {
+    return std::exchange(frame_ready_, false);
+}
+
 bool PPU::lcdc_enable() const {
-    // Bit 7 of LCDC (0xFF40) is the LCD enable flag.
-    // When this bit is 0, the PPU is disabled and the screen is blank.
     return lcdc_ & lcdc::kEnable;
 }
 
 bool PPU::lcdc_tile_map_area() const {
-    // Bit 6 of LCDC (0xFF40) is the tile map area flag.
-    // 0 = the background tile map is at 0x9800-0x9BFF.
-    // 1 = the background tile map is at 0x9C00-0x9FFF.
     return lcdc_ & lcdc::kWndTileMap;
 }
 
 bool PPU::lcdc_wnd_enable() const {
-    // Bit 5 of LCDC (0xFF40) is the window enable flag.
-    // 0 = the window is disabled.
-    // 1 = the window is enabled.
     return lcdc_ & lcdc::kWndEnable;
 }
 
 bool PPU::lcdc_bg_wnd_tile_data_area() const {
-    // Bit 4 of LCDC (0xFF40) is the background/window tile data area flag.
-    // 0 = the tile data is at 0x8800-0x97FF (signed addressing).
-    // 1 = the tile data is at 0x8000-0x8FFF (unsigned addressing).
     return lcdc_ & lcdc::kBgWndTileData;
 }
 
 bool PPU::lcdc_bg_tile_map_area() const {
-    // Bit 3 of LCDC (0xFF40) is the background tile map area flag.
-    // 0 = the background tile map is at 0x9800-0x9BFF.
-    // 1 = the background tile map is at 0x9C00-0x9FFF.
     return lcdc_ & lcdc::kBgTileMap;
 }
 
 bool PPU::lcdc_obj_size() const {
-    // Bit 2 of LCDC (0xFF40) is the object size flag.
-    // 0 = 8x8 sprites.
-    // 1 = 8x16 sprites.
     return lcdc_ & lcdc::kObjSize;
 }
 
 bool PPU::lcdc_obj_enable() const {
-    // Bit 1 of LCDC (0xFF40) is the object enable flag.
-    // 0 = sprites are disabled.
-    // 1 = sprites are enabled.
     return lcdc_ & lcdc::kObjEnable;
 }
 
 bool PPU::lcdc_bg_wnd_enable() const {
-    // Bit 0 of LCDC (0xFF40) is the background/window enable flag.
-    // 0 = the background and window are disabled.
-    // 1 = the background and window are enabled.
     return lcdc_ & lcdc::kBgWndEnable;
 }
 
