@@ -113,6 +113,14 @@ private:
         Drawing = 3,
     };
 
+    // Steps of the mode 3 pixel fetcher
+    enum class PixelFetchStep : std::uint8_t {
+        GetTile,
+        GetTileDataLow,
+        GetTileDataHigh,
+        Push
+    };
+
     Mode mode() const { return static_cast<Mode>(stat_ & stat::kModeMask); }
     void set_mode(Mode mode);
 
@@ -176,6 +184,15 @@ private:
     // Pixel FIFOs for mode 3 drawing. The fetcher fills these with pixels to be drawn.
     PixelFifo obj_fifo_{};
     PixelFifo bg_fifo_{};
+
+    PixelFetchStep fetch_step_ = PixelFetchStep::GetTile;
+    std::uint8_t fetch_dots_ = 0;
+    std::uint8_t fetch_x_ = 0;
+    std::uint16_t tile_addr_ = 0;
+    std::uint8_t tile_lo_ = 0;
+    std::uint8_t tile_hi_ = 0;
+    std::uint8_t discard_ = 0;
+    bool first_fetch_ = false;
 };
 
 } // namespace cppu

@@ -11,6 +11,7 @@ project(cppu
 # The SDL2 frontend is only built by default when cppu is the top-level
 # project, so embedding cppu in another emulator doesn't pull in SDL2.
 option(CPPU_BUILD_FRONTEND "Build the SDL2 test frontend" ${PROJECT_IS_TOP_LEVEL})
+option(CPPU_BUILD_TESTS "Build the cppu tests" ${PROJECT_IS_TOP_LEVEL})
 option(CPPU_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -50,6 +51,14 @@ endif()
 # ---------------------------------------------------------------------------
 if(CPPU_BUILD_FRONTEND)
     add_subdirectory(frontend)
+endif()
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+if(CPPU_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
 endif()
 
 # ---------------------------------------------------------------------------
