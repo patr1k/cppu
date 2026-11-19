@@ -1,4 +1,4 @@
-// Minimal SDL2 host for the cppu library: runs the background + window demo
+// Minimal SDL2 host for the cppu library: runs the background/window/objects demo
 // scene, ticks the PPU one frame's worth of dots at a time, and blits the
 // framebuffer.
 //
@@ -6,6 +6,7 @@
 //   arrows  scroll the background
 //   space   toggle automatic scrolling
 //   W       slide the window in / out
+//   O       show / hide objects (LCDC.1)
 //   Esc     quit
 
 #include <SDL.h>
@@ -34,7 +35,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         return 1;
     }
 
-    SDL_Window* window = SDL_CreateWindow("cppu - background & window demo",
+    SDL_Window* window = SDL_CreateWindow("cppu - background, window & objects demo",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         cppu::kScreenWidth * kScale, cppu::kScreenHeight * kScale, 0);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1,
@@ -49,7 +50,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
     cppu::PPU ppu{};
     demo::Demo scene(ppu);
 
-    std::printf("cppu demo: arrows scroll, space toggles auto-scroll, W toggles the window, Esc quits\n");
+    std::printf("cppu demo: arrows scroll, space toggles auto-scroll, W toggles the window, O toggles objects, Esc quits\n");
 
     std::array<std::uint32_t, cppu::kScreenWidth * cppu::kScreenHeight> pixels{};
 
@@ -66,6 +67,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     case SDLK_ESCAPE: running = false; break;
                     case SDLK_SPACE:  input.toggle_auto_scroll = true; break;
                     case SDLK_w:      input.toggle_window = true; break;
+                    case SDLK_o:      input.toggle_objects = true; break;
                     default: break;
                 }
             }

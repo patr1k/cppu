@@ -1,12 +1,14 @@
 #pragma once
 
-// Background + window demo scene for the cppu frontend.
+// Background, window and objects demo scene for the cppu frontend.
 //
-// Loads a few tiles, a scrolling background map and a window "status bar"
-// into the PPU, then updates the scroll and window registers once per frame.
-// It only talks to the PPU through its public interface (VRAM writes and
-// registers), the same way a game would.
+// Loads a few tiles, a scrolling background map, a window "status bar" and
+// a handful of bouncing ball objects into the PPU, then updates the scroll
+// and window registers and OAM once per frame.
+// It only talks to the PPU through its public interface (VRAM and OAM
+// writes, and registers), the same way a game would.
 
+#include <array>
 #include <cstdint>
 
 #include "cppu/ppu.hpp"
@@ -19,6 +21,7 @@ struct Input {
     int  scroll_y = 0;
     bool toggle_auto_scroll = false;
     bool toggle_window = false;
+    bool toggle_objects = false;
 };
 
 class Demo {
@@ -31,6 +34,14 @@ public:
 
 private:
     void write_status_text();
+    void update_balls();
+
+    struct Ball {
+        double x, y;   // screen position of the top-left corner
+        double vx, vy; // pixels per frame
+        std::uint8_t attrs;
+    };
+    static constexpr int kNumBalls = 8;
 
     cppu::PPU& ppu_;
     int    frame_ = 0;
@@ -38,7 +49,9 @@ private:
     double pos_y_ = 0.0;
     bool   auto_scroll_ = true;
     bool   window_shown_ = true;
+    bool   objects_shown_ = true;
     int    wy_ = 0;
+    std::array<Ball, kNumBalls> balls_{};
 };
 
 } // namespace demo

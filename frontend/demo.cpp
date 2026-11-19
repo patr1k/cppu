@@ -20,7 +20,11 @@ constexpr std::uint16_t kWndMap = 0x1C00;
 
 constexpr std::uint8_t kLcdc = cppu::lcdc::kEnable | cppu::lcdc::kWndTileMap |
                                cppu::lcdc::kWndEnable | cppu::lcdc::kBgWndTileData |
-                               cppu::lcdc::kBgWndEnable;
+                               cppu::lcdc::kObjEnable | cppu::lcdc::kBgWndEnable;
+
+// Object palettes: OBP0 is the identity, OBP1 makes the ball lighter.
+constexpr std::uint8_t kObp0 = 0xE4; // 1->1 2->2 3->3
+constexpr std::uint8_t kObp1 = 0xD0; // 1->0 2->1 3->3
 
 // Tile indices
 constexpr std::uint8_t kTileGrass     = 0;
@@ -28,6 +32,7 @@ constexpr std::uint8_t kTileBrick     = 1;
 constexpr std::uint8_t kTileBall      = 2;
 constexpr std::uint8_t kTileWndBorder = 3;
 constexpr std::uint8_t kTileWndBlank  = 4;
+constexpr std::uint8_t kTileObjBall   = 5;
 constexpr std::uint8_t kTileFontBase  = 16;
 
 // The window slides between these WY values. WY = 144 is never reached by
@@ -68,6 +73,18 @@ const TileArt kBall = {
     "31222223",
     "32222223",
     "03222230",
+    "00333300",
+};
+
+// Object tile: color 0 is transparent, so the corners show what's behind.
+const TileArt kObjBall = {
+    "00333300",
+    "03111130",
+    "31311313",
+    "31111113",
+    "31311313",
+    "31133113",
+    "03111130",
     "00333300",
 };
 
@@ -179,6 +196,7 @@ Demo::Demo(cppu::PPU& ppu) : ppu_(ppu), wy_(kWyShown) {
     write_tile(ppu_, kTileBall, kBall);
     write_tile(ppu_, kTileWndBorder, kWndBorder);
     write_tile(ppu_, kTileWndBlank, kWndBlank);
+    write_tile(ppu_, kTileObjBall, kObjBall);
     for (int i = 0; i < kFontSize; ++i) {
         write_glyph_tile(ppu_, static_cast<std::uint8_t>(kTileFontBase + i), kFont[i]);
     }
@@ -198,6 +216,23 @@ Demo::Demo(cppu::PPU& ppu) : ppu_(ppu), wy_(kWyShown) {
     write_status_text();
 
     ppu_.write_register(cppu::Reg::BGP, 0xE4); // identity: color n -> shade n
+    ppu_.write_register(cppu::Reg::OBP0, kObp0);
+    ppu_.write_register(cppu::Reg::OBP1, kObp1);
+
+    // Balls with assorted speeds. Every other ball uses OBP1, and every third
+    // has the BG-priority bit set, so it passes behind the bricks (BG colors
+    // 1-3) but stays in front of the grass (color 0).
+    for (int i = 0; i < kNumBalls; ++i) {
+        Ball& b = balls_[static_cast<std::size_t>(i)];
+        b.x  = 10.0 + i * 17.0;
+        b.y  = 8.0 + i * 13.0;
+        b.vx = (i % 2 ? -1.0 : 1.0) * (0.6 + 0.15 * i);
+        b.vy = (i % 3 ? 1.0 : -1.0) * (0.9 - 0.07 * i);
+        b.attrs = 0;
+        if (i % 2) b.attrs |= cppu::oam::kPalette;
+        if (i % 3 == 0) b.attrs |= cppu::oam::kBgPriority;
+    }
+    update_balls();
     ppu_.write_register(cppu::Reg::WX, 7);     // window starts at the left edge
     ppu_.write_register(cppu::Reg::WY, static_cast<std::uint8_t>(wy_));
     ppu_.write_register(cppu::Reg::LCDC, kLcdc);
@@ -209,6 +244,9 @@ void Demo::update(const Input& input) {
     }
     if (input.toggle_window) {
         window_shown_ = !window_shown_;
+    }
+    if (input.toggle_objects) {
+        objects_shown_ = !objects_shown_;
     }
 
     if (auto_scroll_) {
@@ -227,9 +265,35 @@ void Demo::update(const Input& input) {
     ppu_.write_register(cppu::Reg::SCX, static_cast<std::uint8_t>(static_cast<int>(std::floor(pos_x_)) & 0xFF));
     ppu_.write_register(cppu::Reg::SCY, static_cast<std::uint8_t>(static_cast<int>(std::floor(pos_y_)) & 0xFF));
     ppu_.write_register(cppu::Reg::WY, static_cast<std::uint8_t>(wy_));
+    ppu_.write_register(cppu::Reg::LCDC, static_cast<std::uint8_t>(
+        objects_shown_ ? kLcdc : (kLcdc & ~cppu::lcdc::kObjEnable)));
     write_status_text();
+    update_balls();
 
     ++frame_;
+}
+
+// Moves each ball, bounces it off the screen edges, and writes it to OAM.
+// OAM positions are offset: X = screen X + 8, Y = screen Y + 16.
+void Demo::update_balls() {
+    constexpr double kMaxX = cppu::kScreenWidth - 8;
+    constexpr double kMaxY = cppu::kScreenHeight - 8;
+
+    for (int i = 0; i < kNumBalls; ++i) {
+        Ball& b = balls_[static_cast<std::size_t>(i)];
+        b.x += b.vx;
+        b.y += b.vy;
+        if (b.x < 0)     { b.x = -b.x;            b.vx = -b.vx; }
+        if (b.x > kMaxX) { b.x = 2 * kMaxX - b.x; b.vx = -b.vx; }
+        if (b.y < 0)     { b.y = -b.y;            b.vy = -b.vy; }
+        if (b.y > kMaxY) { b.y = 2 * kMaxY - b.y; b.vy = -b.vy; }
+
+        const auto base = static_cast<std::uint8_t>(i * 4);
+        ppu_.write_oam(base, static_cast<std::uint8_t>(static_cast<int>(b.y) + 16));
+        ppu_.write_oam(static_cast<std::uint8_t>(base + 1), static_cast<std::uint8_t>(static_cast<int>(b.x) + 8));
+        ppu_.write_oam(static_cast<std::uint8_t>(base + 2), kTileObjBall);
+        ppu_.write_oam(static_cast<std::uint8_t>(base + 3), b.attrs);
+    }
 }
 
 void Demo::write_status_text() {

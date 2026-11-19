@@ -6,7 +6,7 @@ A standalone emulator for the **Game Boy (DMG) Picture Processing Unit**, writte
 
 cppu emulates only the PPU, not a whole Game Boy. It builds as a library that you can drop into a full Game Boy emulator or into a custom project that just needs Game Boy-style graphics. The PPU owns its VRAM, OAM and LCD registers. The host program drives the clock and connects those to its own memory map.
 
-A small SDL2 frontend is included for viewing the output while developing. It runs a demo scene: a scrolling background with a window status bar showing SCX/SCY. Arrow keys scroll, Space toggles auto-scroll, W slides the window in and out, and Esc quits.
+A small SDL2 frontend is included for viewing the output while developing. It runs a demo scene: a scrolling background, a window status bar showing SCX/SCY, and bouncing ball objects (some using OBP1, some with the BG-priority bit so they pass behind the bricks). Arrow keys scroll, Space toggles auto-scroll, W slides the window in and out, O shows or hides objects, and Esc quits.
 
 > **Status:** early development. Working so far:
 >
@@ -21,9 +21,14 @@ A small SDL2 frontend is included for viewing the output while developing. It ru
 > - the window: it starts when LY has matched WY earlier in the frame and the screen X reaches WX − 7, then restarts the fetcher on the window's tile map (LCDC.6)
 >   - its own line counter, which only advances on lines where the window was drawn
 >   - WX ≥ 167 or WY never reached keeps it hidden
-> - mode 3 timing of 172 + (SCX % 8) dots, including the discarded first tile fetch of each line, plus 6 dots on lines where the window starts
+> - objects (sprites):
+>   - OAM scan checks one entry every 2 dots and keeps the first 10 objects on the line, in OAM order (off-screen X positions still count)
+>   - when an object's X is reached, the BG fetcher and output pause while its tile row is fetched and merged into the object FIFO
+>   - X/Y flip, 8×16 objects (LCDC.2), and objects partly off any edge
+>   - DMG overlap priority (smaller X wins, then lower OAM index), the BG-priority bit, OBP0/OBP1, LCDC.1 to hide objects, and objects still drawn when LCDC.0 blanks the background
+> - mode 3 timing of 172 + (SCX % 8) dots, including the discarded first tile fetch of each line, plus 6 dots on lines where the window starts and 6 dots per object fetched
 >
-> Not written yet: objects (OAM scan doesn't select objects yet) and the extra mode 3 dots they add. The window's edge cases for WX < 7 aren't handled.
+> Not written yet: the exact object timing (hardware costs 6–11 dots per object depending on where it falls within a BG tile; cppu uses a fixed 6), blocking CPU access to VRAM/OAM during modes 2–3, and OAM DMA. The window's edge cases for WX < 7 aren't handled.
 
 ## Goals
 
@@ -44,11 +49,12 @@ cppu/
 ├── frontend/            # SDL2 test harness (not part of the library)
 │   ├── CMakeLists.txt
 │   ├── main.cpp         # SDL2 window, input and display
-│   └── demo.hpp/.cpp    # BG + window demo scene (tiles, maps, registers)
+│   └── demo.hpp/.cpp    # demo scene: BG, window and objects (tiles, maps, OAM, registers)
 ├── tests/               # CTest executables
 │   ├── CMakeLists.txt
 │   ├── bg_render_test.cpp
-│   └── window_render_test.cpp
+│   ├── window_render_test.cpp
+│   └── object_render_test.cpp
 └── docs/                # notes and hardware references
 ```
 
@@ -206,6 +212,7 @@ ctest --test-dir build --output-on-failure
 |-------------|----------------|
 | `bg_render` | Renders a frame from a known tile pattern and compares every pixel against expected colors, across no scroll, fine scroll, wraparound and signed tile data. Also checks that mode 3 lasts 172 + (SCX % 8) dots. |
 | `window_render` | Renders frames with different BG and window tile maps and compares every pixel against a reference model, across window positions (including WX=7, WX=166, WX=167 and an unreached WY), swapped tile maps, and LCDC.5 turned off for some lines to check the window's line counter. Also checks that mode 3 is 6 dots longer on lines where the window starts. |
+| `object_render` | Places objects over a known BG and compares every pixel against a reference model of the DMG object rules: positions partly off each edge, X/Y flip, 8×16 objects, overlap priority, the 10-per-line limit, OBP0/OBP1, the BG-priority bit, and LCDC.0/LCDC.1. Also checks that mode 3 is 6 dots longer per object fetched. |
 
 ## Timing reference (DMG)
 
