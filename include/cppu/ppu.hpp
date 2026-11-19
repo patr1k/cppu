@@ -211,6 +211,7 @@ private:
     std::uint8_t wnd_line_ = 0;
 
     bool pixel_expected() const;
+    std::uint8_t obj_fetch_length(const Object& obj);
     std::uint8_t apply_palette(std::uint8_t palette, std::uint8_t color) const;
 
     std::array<Object, kMaxObjectsPerLine> line_obj_list_{};
@@ -219,6 +220,15 @@ private:
     std::int8_t obj_fetch_idx_ = -1;
     std::uint8_t obj_fetch_dots_ = 0;
     std::uint16_t obj_fetched_ = 0;
+    // Total length in dots of the object fetch in progress (6-11).
+    std::uint8_t obj_fetch_len_ = 0;
+
+    // The BG/window tile that last charged an object the extra "wait for the
+    // BG fetcher" dots, so later objects in the same tile only pay 6.
+    // kNoPenaltyTile = none yet this line. (Not -1: an object hanging off the
+    // left edge sits in BG tile -1.) See obj_fetch_length().
+    static constexpr int kNoPenaltyTile = -1000;
+    int obj_penalty_tile_ = kNoPenaltyTile;
 };
 
 } // namespace cppu

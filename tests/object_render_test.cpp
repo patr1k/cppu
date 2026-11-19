@@ -12,9 +12,9 @@
 //   - LCDC.1 off hides objects; LCDC.0 off blanks the BG to white but objects
 //     are still drawn (and always win)
 //
-// It also checks mode 3 on every visible line: 172 + (SCX % 8), plus 6 dots
-// per object fetched (every selected object with X < 168). That fixed 6-dot
-// cost is a simplification of the hardware's 6-11 dots.
+// It also checks mode 3 on every visible line: 172 + (SCX % 8), plus 6-11
+// dots per object fetched (every selected object with X < 168), following
+// Pan Docs' rule; see object_penalty() below.
 
 #include <cppu/ppu.hpp>
 
@@ -61,6 +61,61 @@ struct Case {
     std::uint8_t     scx = 0;
     std::uint8_t     scy = 0;
 };
+
+// Extra mode 3 dots for the objects selected on one line (no window).
+//
+// Objects are fetched in the order the screen reaches them: an object's
+// fetch starts at screen X max(X - 8, 0), and objects due at the same X are
+// fetched in OAM order. Each costs:
+//   - 11 if X == 0
+//   - 6 if an earlier object already paid for the BG tile under its
+//     leftmost pixel
+//   - otherwise 6 + max(0, 5 - p), p = its leftmost pixel's position in that
+//     BG tile
+int object_penalty(const Case& c, const std::vector<int>& selected) {
+    if (!c.obj_enable) {
+        return 0;
+    }
+
+    std::vector<int> order;
+    for (int i : selected) {
+        if (c.objs[static_cast<std::size_t>(i)].x < 168) {
+            order.push_back(i);
+        }
+    }
+    auto start = [&](int i) {
+        const int x = c.objs[static_cast<std::size_t>(i)].x;
+        return x > 8 ? x - 8 : 0;
+    };
+    // Stable insertion sort by start position keeps OAM order for ties.
+    for (std::size_t a = 1; a < order.size(); ++a) {
+        for (std::size_t b = a; b > 0 && start(order[b]) < start(order[b - 1]); --b) {
+            std::swap(order[b], order[b - 1]);
+        }
+    }
+
+    int total = 0;
+    bool have_tile = false;
+    int last_tile = 0;
+    for (int i : order) {
+        const int x = c.objs[static_cast<std::size_t>(i)].x;
+        if (x == 0) {
+            total += 11;
+            continue;
+        }
+        const int bg_x = x - 8 + c.scx;                 // BG pixel under the leftmost pixel
+        const int tile = (bg_x + 256) / 8;              // +256 keeps it non-negative
+        const int p = (bg_x + 256) % 8;
+        if (have_tile && tile == last_tile) {
+            total += 6;
+        } else {
+            total += 6 + (p < 5 ? 5 - p : 0);
+            have_tile = true;
+            last_tile = tile;
+        }
+    }
+    return total;
+}
 
 int run(const Case& c) {
     PPU ppu;
@@ -185,13 +240,7 @@ int run(const Case& c) {
             }
         }
 
-        int fetched = 0;
-        if (c.obj_enable) {
-            for (int i : selected) {
-                if (c.objs[static_cast<std::size_t>(i)].x < 168) ++fetched;
-            }
-        }
-        const int want_mode3 = 172 + c.scx % 8 + 6 * fetched;
+        const int want_mode3 = 172 + c.scx % 8 + object_penalty(c, selected);
         if (mode3_dots[y] != want_mode3) {
             if (timing_mismatches < 5) {
                 std::printf("    mode 3 on line %d: got %d dots, want %d\n", y, mode3_dots[y], want_mode3);
@@ -278,6 +327,35 @@ int main() {
         {30, 30, T + 56, 0},
         {30, 50, T + 57, kBgPriority},
     }, false, true, false});
+
+    // --- Timing: one object per line at each position p = 0..7 within a BG
+    // tile, so each line shows one row of the 6-11 dot table.
+    for (int scx : {0, 3}) {
+        Case c{scx == 0 ? "timing: each position in a tile, SCX=0"
+                        : "timing: each position in a tile, SCX=3", {}};
+        c.scx = static_cast<std::uint8_t>(scx);
+        for (int p = 0; p < 8; ++p) {
+            // Leftmost pixel at BG X 32 + p (inside the 5th BG tile).
+            const int screen_x = 32 + p - scx;
+            c.objs.push_back({20 + p * 12, screen_x + 8, T + 20 + p, 0});
+        }
+        cases.push_back(c);
+    }
+
+    cases.push_back({"timing: only the first object in a tile pays the wait", {
+        {30, 32, T + 1, 0},   // p=0: 11
+        {30, 35, T + 2, 0},   // same tile: 6
+        {50, 37, T + 3, 0},   // p=5: 6
+        {50, 41, T + 4, 0},   // next tile, p=1: 10
+        {70, 40, T + 5, 0},   // p=0: 11
+        {70, 40, T + 6, 0},   // same X, same tile: 6
+    }});
+
+    cases.push_back({"timing: X=0 costs 11 regardless of SCX", {
+        {30, 0, T + 7, 0},
+        {50, 0, T + 8, 0},
+        {50, 60, T + 9, 0},
+    }, false, true, true, 6});
 
     int failures = 0;
     for (const Case& c : cases) {

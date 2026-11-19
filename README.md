@@ -26,9 +26,9 @@ A small SDL2 frontend is included for viewing the output while developing. It ru
 >   - when an object's X is reached, the BG fetcher and output pause while its tile row is fetched and merged into the object FIFO
 >   - X/Y flip, 8×16 objects (LCDC.2), and objects partly off any edge
 >   - DMG overlap priority (smaller X wins, then lower OAM index), the BG-priority bit, OBP0/OBP1, LCDC.1 to hide objects, and objects still drawn when LCDC.0 blanks the background
-> - mode 3 timing of 172 + (SCX % 8) dots, including the discarded first tile fetch of each line, plus 6 dots on lines where the window starts and 6 dots per object fetched
+> - mode 3 timing of 172 + (SCX % 8) dots, including the discarded first tile fetch of each line, plus 6 dots on lines where the window starts and 6–11 dots per object fetched. An object costs 11 at X = 0, 6 if an earlier object already paid for the BG tile under its leftmost pixel, and otherwise 6 + max(0, 5 − p), where p is that pixel's position in the tile (Pan Docs' rule)
 >
-> Not written yet: the exact object timing (hardware costs 6–11 dots per object depending on where it falls within a BG tile; cppu uses a fixed 6), blocking CPU access to VRAM/OAM during modes 2–3, and OAM DMA. The window's edge cases for WX < 7 aren't handled.
+> Not written yet: blocking CPU access to VRAM/OAM during modes 2–3, and OAM DMA. The window's edge cases for WX < 7 aren't handled. Object timing for objects partly off the left edge (X = 1–7) or over the window follows the same rule but hasn't been checked against hardware tests.
 
 ## Goals
 
@@ -212,7 +212,8 @@ ctest --test-dir build --output-on-failure
 |-------------|----------------|
 | `bg_render` | Renders a frame from a known tile pattern and compares every pixel against expected colors, across no scroll, fine scroll, wraparound and signed tile data. Also checks that mode 3 lasts 172 + (SCX % 8) dots. |
 | `window_render` | Renders frames with different BG and window tile maps and compares every pixel against a reference model, across window positions (including WX=7, WX=166, WX=167 and an unreached WY), swapped tile maps, and LCDC.5 turned off for some lines to check the window's line counter. Also checks that mode 3 is 6 dots longer on lines where the window starts. |
-| `object_render` | Places objects over a known BG and compares every pixel against a reference model of the DMG object rules: positions partly off each edge, X/Y flip, 8×16 objects, overlap priority, the 10-per-line limit, OBP0/OBP1, the BG-priority bit, and LCDC.0/LCDC.1. Also checks that mode 3 is 6 dots longer per object fetched. |
+| `object_render` | Places objects over a known BG and compares every pixel against a reference model of the DMG object rules: positions partly off each edge, X/Y flip, 8×16 objects, overlap priority, the 10-per-line limit, OBP0/OBP1, the BG-priority bit, and LCDC.0/LCDC.1. Also checks mode 3 length on every line against the 6–11-dot object timing rule. |
+| `object_render` (timing cases) | Cases aimed at object timing: one object at each position p = 0–7 within a BG tile, with SCX = 0 and SCX = 3 (one row of the 6–11-dot table per line); two objects in the same BG tile, where only the first pays the extra wait; and objects at X = 0 costing 11 dots with a nonzero SCX. |
 
 ## Timing reference (DMG)
 

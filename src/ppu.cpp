@@ -82,6 +82,8 @@ void PPU::set_mode(Mode mode) {
 
             obj_fetched_ = 0;
             obj_fetch_idx_ = -1;
+
+            obj_penalty_tile_ = kNoPenaltyTile;
             break;
 
         case Mode::HBlank:
@@ -122,13 +124,77 @@ std::uint8_t PPU::apply_palette(std::uint8_t palette, std::uint8_t color) const 
     return (palette >> (color * 2)) & 3;
 }
 
+// How many dots the fetch of `obj` stalls mode 3: 6 to 11.
+//
+// On hardware, the object fetch can't start until the BG fetcher has
+// finished fetching the tile it's working on, and then the object fetch
+// itself takes 6 dots. Pan Docs describes the cost in terms of the BG tile
+// that contains the object's leftmost pixel:
+//
+//   - If an earlier object on this line already paid the wait for that
+//     tile, this one only pays 6.
+//   - Otherwise it pays 6 + max(0, 5 - p), where p (0-7) is the position
+//     of the object's leftmost pixel within that tile. 5 - p is "pixels of
+//     the tile strictly to the right of it, minus 2". So an object at the
+//     start of a tile costs 11, and one at p >= 5 costs 6.
+//   - An object at X = 0 always costs 11, whatever SCX is.
+//
+// Our fetcher's timing within a tile doesn't line up with the hardware's
+// (we push and pop in the same dot), so simulating the wait would give the
+// wrong numbers. Instead we compute the documented cost directly.
+//
+// Less certain: objects at X = 1-7 (partly off the left edge) and objects
+// whose leftmost pixel lands exactly where the window starts. Check these
+// against test ROMs (e.g. mealybug-tearoom) once a CPU is attached.
+std::uint8_t PPU::obj_fetch_length(const Object& obj) {
+    constexpr int kObjFetchDots = 6;
+
+    if (obj.x == 0) {
+        return 11;
+    }
+
+    // Screen X of the object's leftmost pixel. Negative (-7..-1) for
+    // objects hanging off the left edge (X = 1-7).
+    const int sx = obj.x - 8;
+
+    // Find the tile under that pixel: its position p within the tile, and
+    // an ID for the tile so we can tell whether it has already been charged.
+    // `int` math throughout: `& 7` and `>> 3` on negative values round
+    // toward -infinity in C++20, which is what we want here.
+    int p;
+    int tile_id;
+    const int wnd_start = wx_ - 7;
+    if (in_wnd_ && sx >= wnd_start) {
+        // Window tiles are aligned to where the window starts. Offset their
+        // IDs so they can't collide with BG tile IDs.
+        p = (sx - wnd_start) & 7;
+        tile_id = 64 + ((sx - wnd_start) >> 3);
+    } else {
+        // BG tiles are aligned to the scrolled background: screen pixel sx
+        // is BG pixel sx + SCX.
+        p = (sx + scx_) & 7;
+        tile_id = (sx + (scx_ & 7)) >> 3;
+    }
+
+    if (tile_id == obj_penalty_tile_) {
+        return kObjFetchDots;
+    }
+    obj_penalty_tile_ = tile_id;
+    const int wait = p < 5 ? 5 - p : 0;
+    return static_cast<std::uint8_t>(kObjFetchDots + wait);
+}
+
 void PPU::tick_drawing() {
     if (obj_fetch_idx_ >= 0) {
-        // advance the fetch; if it's finished, do the reads + merge, mark fetched, clear "in progress"
+        // An object fetch is in progress. The BG fetcher and pixel output stay
+        // frozen until it finishes, which is what makes mode 3 longer.
+        // obj_fetch_len_ (6-11 dots) was set when the fetch started.
         ++obj_fetch_dots_;
-        if (obj_fetch_dots_ < 6) return;
+        if (obj_fetch_dots_ < obj_fetch_len_) return;
 
-        // 6th dot: do the fetch and merge
+        // Last dot of the fetch: read the tile row and merge it into the
+        // object FIFO. (Doing all the VRAM reads on one dot only matters if
+        // the CPU writes VRAM during the fetch.)
         auto obj = line_obj_list_[obj_fetch_idx_];
         std::uint8_t height = lcdc_obj_size() ? 16 : 8;
         std::uint8_t row = static_cast<std::uint8_t>(ly_ + 16 - obj.y);
@@ -177,8 +243,11 @@ void PPU::tick_drawing() {
         for (std::uint8_t i = 0; i < line_obj_count_; i++) {
             if (((obj_fetched_ >> i) & 1) == 0) {
                 if (line_obj_list_[i].x <= mode3_x_ + 8) {
-                    obj_fetch_idx_ = i;
+                    // Start fetching this object. This dot counts as the
+                    // first dot of the fetch.
+                    obj_fetch_idx_ = static_cast<std::int8_t>(i);
                     obj_fetch_dots_ = 1;
+                    obj_fetch_len_ = obj_fetch_length(line_obj_list_[i]);
                     return;
                 }
             }
