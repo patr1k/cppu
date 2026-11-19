@@ -455,33 +455,51 @@ std::uint8_t PPU::apply_palette(std::uint8_t palette, std::uint8_t color) const 
 // Memory and register access (CPU side)
 // ---------------------------------------------------------------------------
 
+// While the LCD is on, the PPU has VRAM to itself during mode 3 (drawing)
+// and OAM during modes 2 and 3 (OAM scan and drawing). The CPU sees 0xFF
+// on reads and its writes are dropped. With the LCD off, both are always
+// accessible: that's when games load large amounts of data.
+//
+// The PPU's own reads (OAM scan, the fetchers) use vram_ / oam_ directly,
+// so they're never affected.
+bool PPU::vram_accessible() const {
+    return !lcdc_enable() || mode() != Mode::Drawing;
+}
+
+bool PPU::oam_accessible() const {
+    return !lcdc_enable() || (mode() != Mode::OamScan && mode() != Mode::Drawing);
+}
+
 std::uint8_t PPU::read_vram(std::uint16_t addr) const {
-    if (addr >= vram_.size()) {
-        // Invalid VRAM address
+    if (addr >= vram_.size() || !vram_accessible()) {
         return 0xFF;
     }
     return vram_[addr];
 }
 
 void PPU::write_vram(std::uint16_t addr, std::uint8_t value) {
-    if (addr >= vram_.size()) {
-        // Invalid VRAM address
+    if (addr >= vram_.size() || !vram_accessible()) {
         return;
     }
     vram_[addr] = value;
 }
 
 std::uint8_t PPU::read_oam(std::uint8_t addr) const {
-    if (addr >= oam_.size()) {
-        // Invalid OAM address
+    if (addr >= oam_.size() || !oam_accessible()) {
         return 0xFF;
     }
     return oam_[addr];
 }
 
 void PPU::write_oam(std::uint8_t addr, std::uint8_t value) {
+    if (addr >= oam_.size() || !oam_accessible()) {
+        return;
+    }
+    oam_[addr] = value;
+}
+
+void PPU::write_oam_dma(std::uint8_t addr, std::uint8_t value) {
     if (addr >= oam_.size()) {
-        // Invalid OAM address
         return;
     }
     oam_[addr] = value;
@@ -504,6 +522,7 @@ std::uint8_t PPU::read_register(Reg reg) const {
         case Reg::OBP1: return obp1_;
         case Reg::WY:   return wy_;
         case Reg::WX:   return wx_;
+        case Reg::DMA:  return dma_;
         default:
             // Invalid register address
             return 0xFF;
@@ -542,6 +561,7 @@ void PPU::write_register(Reg reg, std::uint8_t value) {
         case Reg::OBP1: obp1_ = value; break;
         case Reg::WY:   wy_ = value; break;
         case Reg::WX:   wx_ = value; break;
+        case Reg::DMA:  dma_ = value; break; // the host runs the transfer
         default:
             // Invalid register address, ignore write
             break;

@@ -16,3 +16,6 @@ add_test(NAME window_render COMMAND cppu_window_render_test)
 
 cppu_add_test(cppu_object_render_test object_render_test.cpp)
 add_test(NAME object_render COMMAND cppu_object_render_test)
+
+cppu_add_test(cppu_access_test access_test.cpp)
+add_test(NAME access COMMAND cppu_access_test)

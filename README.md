@@ -26,9 +26,11 @@ A small SDL2 frontend is included for viewing the output while developing. It ru
 >   - when an object's X is reached, the BG fetcher and output pause while its tile row is fetched and merged into the object FIFO
 >   - X/Y flip, 8×16 objects (LCDC.2), and objects partly off any edge
 >   - DMG overlap priority (smaller X wins, then lower OAM index), the BG-priority bit, OBP0/OBP1, LCDC.1 to hide objects, and objects still drawn when LCDC.0 blanks the background
+> - CPU access locking: while the LCD is on, VRAM is locked during mode 3 and OAM during modes 2–3 (reads return 0xFF, writes are ignored)
+> - the PPU's part of OAM DMA: the DMA register reads back its value, and `write_oam_dma()` writes OAM in every mode. The transfer itself is the host's job; see [OAM DMA](#oam-dma)
 > - mode 3 timing of 172 + (SCX % 8) dots, including the discarded first tile fetch of each line, plus 6 dots on lines where the window starts and 6–11 dots per object fetched. An object costs 11 at X = 0, 6 if an earlier object already paid for the BG tile under its leftmost pixel, and otherwise 6 + max(0, 5 − p), where p is that pixel's position in the tile (Pan Docs' rule)
 >
-> Not written yet: blocking CPU access to VRAM/OAM during modes 2–3, and OAM DMA. The window's edge cases for WX < 7 aren't handled. Object timing for objects partly off the left edge (X = 1–7) or over the window follows the same rule but hasn't been checked against hardware tests.
+> Not handled yet: the window's edge cases for WX < 7 aren't handled, and object timing for objects partly off the left edge (X = 1–7) or over the window follows the same rule but hasn't been checked against hardware tests. Access locking switches exactly at mode changes; hardware has a few single-dot quirks around them that aren't modeled.
 
 ## Goals
 
@@ -54,7 +56,8 @@ cppu/
 │   ├── CMakeLists.txt
 │   ├── bg_render_test.cpp
 │   ├── window_render_test.cpp
-│   └── object_render_test.cpp
+│   ├── object_render_test.cpp
+│   └── access_test.cpp
 └── docs/                # notes and hardware references
 ```
 
@@ -109,6 +112,8 @@ std::uint8_t bus_read(std::uint16_t addr) {
 // bus_write() mirrors this with write_vram / write_oam / write_register.
 ```
 
+These are the CPU's view of VRAM and OAM, so they follow the hardware's locking: while the LCD is on, VRAM reads return 0xFF and writes are ignored during mode 3, and the same goes for OAM during modes 2 and 3. Games load VRAM/OAM during VBlank or with the LCD off for this reason.
+
 ### Driving the clock
 
 ```cpp
@@ -128,6 +133,59 @@ if (ppu.frame_ready()) {
 
 The PPU starts with the LCD off (LCDC = 0), and `tick()` does nothing until LCDC bit 7 is set. On real hardware the boot ROM sets LCDC to 0x91. If your host skips the boot ROM, write that value yourself.
 
+### OAM DMA
+
+Games update their objects with OAM DMA: writing a value `XX` to 0xFF46 copies the 160 bytes at `XX00`–`XX9F` into OAM, one byte every 4 dots (640 dots in total). Most games keep a copy of OAM in WRAM and start a transfer during each VBlank.
+
+**cppu leaves OAM DMA to the host.** The transfer reads from the CPU's address space (WRAM, cartridge ROM/RAM, …), and the PPU deliberately knows nothing about the bus. The host already has the bus, and it's also the part that has to enforce DMA's bus restrictions, so it runs the transfer and hands each byte to the PPU.
+
+The host's job:
+
+1. **On a write to 0xFF46:** pass the value to the PPU with `write_register(Reg::DMA, value)`, so reads of 0xFF46 return it, and start (or restart) the transfer from `value << 8`.
+2. **Every 4 dots:** read the next byte through your own bus and write it with `write_oam_dma()`, until all 160 bytes are copied. Use `write_oam_dma()` rather than `write_oam()`: DMA writes reach OAM in every mode, while `write_oam()` is locked during modes 2–3. On hardware the first byte is copied one M-cycle (4 dots) after the write.
+3. **While the transfer runs:** the CPU can only use HRAM (0xFF80–0xFFFE) reliably. That's why games run a small wait loop from HRAM. A simple host returns 0xFF for CPU reads elsewhere and ignores writes.
+
+```cpp
+struct OamDma {
+    bool active = false;
+    std::uint16_t source = 0; // XX00
+    int index = 0;            // next byte to copy, 0-159
+    int dots = 0;             // dots until that byte is copied
+};
+OamDma dma;
+
+// The CPU's view of the bus.
+std::uint8_t bus_read(std::uint16_t addr) {
+    if (dma.active && !(addr >= 0xFF80 && addr <= 0xFFFE))
+        return 0xFF;                       // only HRAM during DMA
+    return raw_read(addr);                 // your normal memory map (see above)
+}
+
+void bus_write(std::uint16_t addr, std::uint8_t value) {
+    if (addr == 0xFF46) {
+        ppu.write_register(cppu::Reg::DMA, value);
+        dma = {true, static_cast<std::uint16_t>(value << 8), 0, 4};
+        return;
+    }
+    if (dma.active && !(addr >= 0xFF80 && addr <= 0xFFFE))
+        return;                            // only HRAM during DMA
+    raw_write(addr, value);
+}
+
+// Call once per dot, next to ppu.tick().
+void tick_dma() {
+    if (!dma.active || --dma.dots > 0)
+        return;
+    const auto i = static_cast<std::uint8_t>(dma.index);
+    ppu.write_oam_dma(i, raw_read(static_cast<std::uint16_t>(dma.source + i)));
+    dma.dots = 4;
+    if (++dma.index == 160)
+        dma.active = false;
+}
+```
+
+`raw_read` / `raw_write` are your memory map without the DMA restriction, like the `bus_read` in [Connecting the PPU to your memory map](#connecting-the-ppu-to-your-memory-map). Source values above 0xDF behave differently on real hardware; see [Pan Docs: OAM DMA](https://gbdev.io/pandocs/OAM_DMA_Transfer.html) if a game relies on that.
+
 ## API reference
 
 ### `cppu::PPU`
@@ -135,18 +193,18 @@ The PPU starts with the LCD off (LCDC = 0), and `tick()` does nothing until LCDC
 | Member | Description |
 |---|---|
 | `PPU()` | Creates a PPU with VRAM, OAM and all registers zeroed, except that the STAT mode bits start at 2 (OAM scan). |
-| `void tick()` | Advances the PPU by one dot (one master clock cycle) and handles mode changes, LY and interrupts. Does nothing while the LCD is off. *Pixel output isn't implemented yet.* |
-| `std::uint8_t read_vram(std::uint16_t offset) const` | Reads VRAM at `offset` (0x0000–0x1FFF). Out-of-range offsets return 0xFF. |
-| `void write_vram(std::uint16_t offset, std::uint8_t value)` | Writes VRAM. Out-of-range writes are ignored. |
-| `std::uint8_t read_oam(std::uint8_t offset) const` | Reads OAM at `offset` (0x00–0x9F). Out-of-range offsets return 0xFF. |
-| `void write_oam(std::uint8_t offset, std::uint8_t value)` | Writes OAM. Out-of-range writes are ignored. Also the entry point for a host-driven OAM DMA transfer. |
+| `void tick()` | Advances the PPU by one dot (one master clock cycle): OAM scan, the pixel FIFOs and fetchers, mode changes, LY and interrupts. Does nothing while the LCD is off. |
+| `std::uint8_t read_vram(std::uint16_t offset) const` | Reads VRAM at `offset` (0x0000–0x1FFF). Returns 0xFF for out-of-range offsets, and during mode 3 while the LCD is on. |
+| `void write_vram(std::uint16_t offset, std::uint8_t value)` | Writes VRAM. Ignored for out-of-range offsets, and during mode 3 while the LCD is on. |
+| `std::uint8_t read_oam(std::uint8_t offset) const` | Reads OAM at `offset` (0x00–0x9F). Returns 0xFF for out-of-range offsets, and during modes 2–3 while the LCD is on. |
+| `void write_oam(std::uint8_t offset, std::uint8_t value)` | Writes OAM. Ignored for out-of-range offsets, and during modes 2–3 while the LCD is on. |
+| `void write_oam_dma(std::uint8_t offset, std::uint8_t value)` | Writes OAM for a host-driven OAM DMA transfer. Never locked, since DMA writes reach OAM in every mode. Out-of-range offsets are ignored. See [OAM DMA](#oam-dma). |
 | `std::uint8_t read_register(Reg reg) const` | Reads an LCD register (see below). |
 | `void write_register(Reg reg, std::uint8_t value)` | Writes an LCD register (see below). |
 | `std::uint8_t take_interrupts()` | Returns the interrupts raised since the last call as `kIntVBlank \| kIntStat` bits, then clears them. OR the result into your IF register. The STAT interrupt fires only on a rising edge of the combined STAT condition, as on hardware. |
 | `bool frame_ready()` | Returns `true` once per frame, after VBlank begins, then `false` until the next VBlank. |
 | `const std::uint8_t* framebuffer() const` | The current output image (see [Driving the clock](#driving-the-clock)). |
 
-VRAM and OAM are not yet locked during modes 2 and 3. For now, CPU access always succeeds.
 
 ### Registers: `cppu::Reg`
 
@@ -159,7 +217,7 @@ Each enumerator's value is the register's offset from 0xFF40, so a host with the
 | `SCY`, `SCX` | 0xFF42–43 | value | stored as-is |
 | `LY` | 0xFF44 | current scanline | ignored (read-only) |
 | `LYC` | 0xFF45 | value | stored as-is |
-| `DMA` | 0xFF46 | 0xFF | ignored. The host performs OAM DMA itself through `write_oam` |
+| `DMA` | 0xFF46 | last value written | stored only. The host runs the transfer; see [OAM DMA](#oam-dma) |
 | `BGP`, `OBP0`, `OBP1` | 0xFF47–49 | value | stored as-is |
 | `WY`, `WX` | 0xFF4A–4B | value | stored as-is |
 
@@ -184,7 +242,7 @@ For decoding register values, e.g. in a debugger:
 | `stat::kLycEqualsLy` | 2 | LY == LYC (read-only) |
 | `stat::kModeMask` | 1–0 | Current PPU mode (read-only) |
 
-`PPU` also has convenience getters that return these bits already decoded: `lcdc_enable()`, `lcdc_wnd_enable()`, `lcdc_tile_map_area()` (window tile map), `lcdc_bg_wnd_tile_data_area()`, `lcdc_bg_tile_map_area()`, `lcdc_obj_size()`, `lcdc_obj_enable()`, `lcdc_bg_wnd_enable()`, `stat_int_mode_0()`, `stat_int_mode_1()`, `stat_int_mode_2()`, `stat_int_mode_lyc()`, `stat_lyc()` and `stat_ppu_mode()` (returns 0–3).
+`PPU` also has convenience getters that return these bits already decoded: `lcdc_enable()`, `lcdc_wnd_enable()`, `lcdc_wnd_tile_map_area()`, `lcdc_bg_wnd_tile_data_area()`, `lcdc_bg_tile_map_area()`, `lcdc_obj_size()`, `lcdc_obj_enable()`, `lcdc_bg_wnd_enable()`, `stat_int_mode_0()`, `stat_int_mode_1()`, `stat_int_mode_2()`, `stat_int_mode_lyc()`, `stat_lyc()` and `stat_ppu_mode()` (returns 0–3).
 
 ### Constants
 
@@ -214,6 +272,7 @@ ctest --test-dir build --output-on-failure
 | `window_render` | Renders frames with different BG and window tile maps and compares every pixel against a reference model, across window positions (including WX=7, WX=166, WX=167 and an unreached WY), swapped tile maps, and LCDC.5 turned off for some lines to check the window's line counter. Also checks that mode 3 is 6 dots longer on lines where the window starts. |
 | `object_render` | Places objects over a known BG and compares every pixel against a reference model of the DMG object rules: positions partly off each edge, X/Y flip, 8×16 objects, overlap priority, the 10-per-line limit, OBP0/OBP1, the BG-priority bit, and LCDC.0/LCDC.1. Also checks mode 3 length on every line against the 6–11-dot object timing rule. |
 | `object_render` (timing cases) | Cases aimed at object timing: one object at each position p = 0–7 within a BG tile, with SCX = 0 and SCX = 3 (one row of the 6–11-dot table per line); two objects in the same BG tile, where only the first pays the extra wait; and objects at X = 0 costing 11 dots with a nonzero SCX. |
+| `access` | CPU access locking: VRAM and OAM reads/writes with the LCD off and in each of modes 0–3 (VRAM locked in mode 3, OAM in modes 2–3, reads return 0xFF, writes ignored). Also checks that `write_oam_dma()` writes OAM even in modes 2–3, and that the DMA register reads back its value. |
 
 ## Timing reference (DMG)
 

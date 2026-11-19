@@ -73,13 +73,19 @@ public:
     // Advance the PPU by one master clock cycle (one dot).
     void tick();
 
-    // VRAM access
+    // VRAM access (CPU side). While the LCD is on, VRAM is locked during
+    // mode 3: reads return 0xFF and writes are ignored.
     std::uint8_t read_vram(std::uint16_t addr) const;
     void write_vram(std::uint16_t addr, std::uint8_t value);
 
-    // OAM access
+    // OAM access (CPU side). While the LCD is on, OAM is locked during
+    // modes 2 and 3: reads return 0xFF and writes are ignored.
     std::uint8_t read_oam(std::uint8_t addr) const;
     void write_oam(std::uint8_t addr, std::uint8_t value);
+
+    // OAM write for a host-driven OAM DMA transfer. Never locked: DMA
+    // writes reach OAM in every mode.
+    void write_oam_dma(std::uint8_t addr, std::uint8_t value);
 
     // Register access
     std::uint8_t read_register(Reg reg) const;
@@ -155,6 +161,10 @@ private:
 
     void update_stat_line();
 
+    // Whether the CPU can currently access VRAM / OAM.
+    bool vram_accessible() const;
+    bool oam_accessible() const;
+
     // --- Mode 2: OAM scan ----------------------------------------------------
     void tick_oam_scan();
     int obj_height() const { return lcdc_obj_size() ? 16 : 8; }
@@ -219,6 +229,10 @@ private:
     // Window position registers (0xFF4A, 0xFF4B)
     std::uint8_t wx_ = 0;
     std::uint8_t wy_ = 0;
+
+    // DMA register (0xFF46). Only stored, so reads return the last value
+    // written; the host runs the transfer itself (see write_oam_dma).
+    std::uint8_t dma_ = 0;
 
     // Dots since the start of the current line (0-455)
     std::uint16_t dots_ = 0;

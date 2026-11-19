@@ -50,6 +50,13 @@ int main(int /*argc*/, char* /*argv*/[]) {
     cppu::PPU ppu{};
     demo::Demo scene(ppu);
 
+    // Run up to the first VBlank, so every update below happens during
+    // VBlank. That's when games update VRAM and OAM: OAM is locked during
+    // modes 2-3 and VRAM during mode 3 while the LCD is on.
+    while (!ppu.frame_ready()) {
+        ppu.tick();
+    }
+
     std::printf("cppu demo: arrows scroll, space toggles auto-scroll, W toggles the window, O toggles objects, Esc quits\n");
 
     std::array<std::uint32_t, cppu::kScreenWidth * cppu::kScreenHeight> pixels{};
@@ -78,13 +85,13 @@ int main(int /*argc*/, char* /*argv*/[]) {
         input.scroll_x = keys[SDL_SCANCODE_RIGHT] - keys[SDL_SCANCODE_LEFT];
         input.scroll_y = keys[SDL_SCANCODE_DOWN] - keys[SDL_SCANCODE_UP];
 
-        // Register writes land at the start of the frame (line 0, before
-        // mode 3), so the whole frame is drawn with the new values.
+        // Update registers, VRAM and OAM during VBlank, then run the PPU
+        // through the next frame up to the following VBlank.
         scene.update(input);
 
-        for (int i = 0; i < cppu::kDotsPerFrame; ++i) {
+        do {
             ppu.tick();
-        }
+        } while (!ppu.frame_ready());
 
         const std::uint8_t* fb = ppu.framebuffer();
         for (std::size_t i = 0; i < pixels.size(); ++i) {

@@ -29,7 +29,8 @@ public:
     // Loads tiles and maps, sets the registers and turns the LCD on.
     explicit Demo(cppu::PPU& ppu);
 
-    // Call once per frame, before ticking the PPU through the frame.
+    // Call once per frame, during VBlank (OAM is locked during modes 2-3
+    // and VRAM during mode 3 while the LCD is on).
     void update(const Input& input);
 
 private:
