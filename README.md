@@ -6,7 +6,7 @@ A standalone emulator for the **Game Boy (DMG) Picture Processing Unit**, writte
 
 cppu emulates only the PPU, not a whole Game Boy. It builds as a library that you can drop into a full Game Boy emulator or into a custom project that just needs Game Boy-style graphics. The PPU owns its VRAM, OAM and LCD registers. The host program drives the clock and connects those to its own memory map.
 
-A small SDL2 frontend is included for viewing the output while developing.
+A small SDL2 frontend is included for viewing the output while developing. It runs a demo scene: a scrolling background with a window status bar showing SCX/SCY. Arrow keys scroll, Space toggles auto-scroll, W slides the window in and out, and Esc quits.
 
 > **Status:** early development. Working so far:
 >
@@ -43,7 +43,8 @@ cppu/
 │   └── ppu.cpp
 ├── frontend/            # SDL2 test harness (not part of the library)
 │   ├── CMakeLists.txt
-│   └── main.cpp
+│   ├── main.cpp         # SDL2 window, input and display
+│   └── demo.hpp/.cpp    # BG + window demo scene (tiles, maps, registers)
 ├── tests/               # CTest executables
 │   ├── CMakeLists.txt
 │   ├── bg_render_test.cpp

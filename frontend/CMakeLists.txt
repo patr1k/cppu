@@ -2,6 +2,7 @@ find_package(SDL2 REQUIRED)
 
 add_executable(cppu_frontend
     main.cpp
+    demo.cpp
 )
 
 target_link_libraries(cppu_frontend PRIVATE cppu::cppu SDL2::SDL2)

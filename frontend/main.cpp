@@ -1,5 +1,12 @@
-// Minimal SDL2 host for the cppu library: owns the memory, ticks the PPU
-// one frame's worth of dots at a time, and blits the framebuffer.
+// Minimal SDL2 host for the cppu library: runs the background + window demo
+// scene, ticks the PPU one frame's worth of dots at a time, and blits the
+// framebuffer.
+//
+// Controls:
+//   arrows  scroll the background
+//   space   toggle automatic scrolling
+//   W       slide the window in / out
+//   Esc     quit
 
 #include <SDL.h>
 
@@ -8,6 +15,7 @@
 #include <cstdio>
 
 #include "cppu/ppu.hpp"
+#include "demo.hpp"
 
 namespace {
 
@@ -26,7 +34,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         return 1;
     }
 
-    SDL_Window* window = SDL_CreateWindow("cppu",
+    SDL_Window* window = SDL_CreateWindow("cppu - background & window demo",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         cppu::kScreenWidth * kScale, cppu::kScreenHeight * kScale, 0);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1,
@@ -39,18 +47,38 @@ int main(int /*argc*/, char* /*argv*/[]) {
     }
 
     cppu::PPU ppu{};
+    demo::Demo scene(ppu);
+
+    std::printf("cppu demo: arrows scroll, space toggles auto-scroll, W toggles the window, Esc quits\n");
 
     std::array<std::uint32_t, cppu::kScreenWidth * cppu::kScreenHeight> pixels{};
 
     bool running = true;
     while (running) {
+        demo::Input input;
+
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT ||
-                (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE)) {
+            if (e.type == SDL_QUIT) {
                 running = false;
+            } else if (e.type == SDL_KEYDOWN && !e.key.repeat) {
+                switch (e.key.keysym.sym) {
+                    case SDLK_ESCAPE: running = false; break;
+                    case SDLK_SPACE:  input.toggle_auto_scroll = true; break;
+                    case SDLK_w:      input.toggle_window = true; break;
+                    default: break;
+                }
             }
         }
+
+        // Arrow keys scroll continuously while held.
+        const Uint8* keys = SDL_GetKeyboardState(nullptr);
+        input.scroll_x = keys[SDL_SCANCODE_RIGHT] - keys[SDL_SCANCODE_LEFT];
+        input.scroll_y = keys[SDL_SCANCODE_DOWN] - keys[SDL_SCANCODE_UP];
+
+        // Register writes land at the start of the frame (line 0, before
+        // mode 3), so the whole frame is drawn with the new values.
+        scene.update(input);
 
         for (int i = 0; i < cppu::kDotsPerFrame; ++i) {
             ppu.tick();
