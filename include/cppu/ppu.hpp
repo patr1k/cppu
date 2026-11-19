@@ -90,7 +90,7 @@ public:
 
     bool lcdc_enable() const;
     bool lcdc_wnd_enable() const;
-    bool lcdc_tile_map_area() const;
+    bool lcdc_wnd_tile_map_area() const;
     bool lcdc_bg_wnd_tile_data_area() const;
     bool lcdc_bg_tile_map_area() const;
     bool lcdc_obj_size() const;
@@ -193,6 +193,10 @@ private:
     std::uint8_t tile_hi_ = 0;
     std::uint8_t discard_ = 0;
     bool first_fetch_ = false;
+
+    bool wy_triggered_ = false;
+    bool in_wnd_ = false;
+    std::uint8_t wnd_line_ = 0;
 };
 
 } // namespace cppu

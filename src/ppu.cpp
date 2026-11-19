@@ -32,6 +32,8 @@ void PPU::end_line() {
     dots_ = 0;
     ly_ = static_cast<std::uint8_t>((ly_ + 1) % kLinesPerFrame);
 
+    if (in_wnd_) ++wnd_line_;
+
     if (ly_ < kScreenHeight) {
         set_mode(Mode::OamScan);         // next visible line (incl. wrap to 0)
         frame_ready_ = false;
@@ -50,11 +52,25 @@ void PPU::set_mode(Mode mode) {
     switch (mode) {
         case Mode::OamScan:
             // TODO: clear the per-line object list
+            if (ly_ == 0) {
+                wy_triggered_ = false;
+                wnd_line_ = 0;
+            }
+            if (ly_ == wy_) {
+                wy_triggered_ = true;
+            }
+            in_wnd_ = false;
             break;
+
         case Mode::Drawing:
+            // Set the X coord we're drawing
             mode3_x_ = 0;
+
+            // Clear the FIFOs
             bg_fifo_.clear();
             obj_fifo_.clear();
+
+            // Set up the fetcher state
             fetch_step_ = PixelFetchStep::GetTile;
             fetch_dots_ = 0;
             fetch_x_ = 0;
@@ -64,6 +80,7 @@ void PPU::set_mode(Mode mode) {
             discard_ = scx_ % 8;
             first_fetch_ = true;
             break;
+
         case Mode::HBlank:
         case Mode::VBlank:
             break;
@@ -78,16 +95,44 @@ void PPU::tick_oam_scan() {
 }
 
 void PPU::tick_drawing() {
+    if (
+        !in_wnd_ 
+        && lcdc_wnd_enable() 
+        && wy_triggered_ 
+        && static_cast<std::uint16_t>(mode3_x_+7) == wx_ 
+        && (!bg_fifo_.empty() || fetch_step_ == PixelFetchStep::Push)
+    ) {
+        // drawing a window
+        in_wnd_ = true;
+        bg_fifo_.clear();
+        fetch_step_ = PixelFetchStep::GetTile;
+        fetch_dots_ = 0;
+        fetch_x_ = 0;
+        discard_ = 0;
+    }
+
     // FIFO INPUT SIDE
     switch (fetch_step_) {
+
+        // Get the tile index from the background tile map, then compute the address of the
+        // tile data for the row of pixels corresponding to LY.
         case PixelFetchStep::GetTile: {
             if (fetch_dots_ == 1) {
-                std::uint16_t base_addr = lcdc_bg_tile_map_area() ? 0x1C00 : 0x1800;
-                std::uint8_t row = ((ly_ + scy_) & 0xFF) / 8;
-                std::uint8_t col = ((scx_ / 8) + fetch_x_) & 0x1F;
+                std::uint16_t base_addr;
+                std::uint8_t row, col, row_offset;
+                if (in_wnd_) {
+                    base_addr = lcdc_wnd_tile_map_area() ? 0x1C00 : 0x1800;
+                    row = wnd_line_ / 8;
+                    col = fetch_x_;
+                    row_offset = (wnd_line_ & 7) * 2;
+                } else {
+                    base_addr = lcdc_bg_tile_map_area() ? 0x1C00 : 0x1800;
+                    row = ((ly_ + scy_) & 0xFF) / 8;
+                    col = ((scx_ / 8) + fetch_x_) & 0x1F;
+                    row_offset = ((ly_ + scy_) & 7) * 2;
+                }
                 std::uint16_t addr = static_cast<std::uint16_t>(base_addr + row * 32 + col);
                 std::uint8_t tile_idx = read_vram(addr);
-                std::uint8_t row_offset = ((ly_ + scy_) & 7) * 2;
                 if (lcdc_bg_wnd_tile_data_area()) {
                     // 0x0000-0x0FFF, unsigned tile index
                     tile_addr_ = static_cast<std::uint16_t>(tile_idx * 16 + row_offset);
@@ -100,25 +145,31 @@ void PPU::tick_drawing() {
             ++fetch_dots_;
             break;
         }
+
+        // Fetch the low byte of the tile data for this row of pixels.
         case PixelFetchStep::GetTileDataLow:
             if (fetch_dots_ == 1) {
                 tile_lo_ = read_vram(tile_addr_);
             }
             ++fetch_dots_;
             break;
+
+        // Fetch the high byte of the tile data for this row of pixels.
         case PixelFetchStep::GetTileDataHigh:
             if (fetch_dots_ == 1) {
                 tile_hi_ = read_vram(tile_addr_ + 1);
             }
             ++fetch_dots_;
             break;
+        
+        // Push the 8 pixels of this tile row into the background FIFO.
         case PixelFetchStep::Push: {
             if (bg_fifo_.empty()) {
                 // If the background FIFO is empty, we need to fill it with pixels
                 for (std::uint8_t i = 0; i < 8; ++i) {
                     std::uint8_t b = 7 - i;
                     std::uint8_t color = (((tile_hi_ >> b) & 1) << 1) | ((tile_lo_ >> b) & 1);
-                    bg_fifo_.push(Pixel{color, 0, false}); // placeholder pixel
+                    bg_fifo_.push(Pixel{color, 0, false});
                 }
                 ++fetch_x_;
                 fetch_step_ = PixelFetchStep::GetTile;
@@ -143,8 +194,7 @@ void PPU::tick_drawing() {
     if (bg_fifo_.size() > 0) {
         auto pixel = bg_fifo_.pop();
 
-        // The first fetch of the line is special: we discard pixels until
-        // the SCX offset is satisfied.
+        // Drop the first scx % 8 pixels for fine scroll
         if (discard_ > 0) {
             --discard_;
             return;
@@ -277,7 +327,7 @@ bool PPU::lcdc_enable() const {
     return lcdc_ & lcdc::kEnable;
 }
 
-bool PPU::lcdc_tile_map_area() const {
+bool PPU::lcdc_wnd_tile_map_area() const {
     return lcdc_ & lcdc::kWndTileMap;
 }
 

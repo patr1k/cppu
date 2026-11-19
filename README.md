@@ -17,10 +17,13 @@ A small SDL2 frontend is included for viewing the output while developing.
 > - background rendering through the pixel FIFO: a dot-by-dot tile fetcher (GetTile → data low → data high → push) feeds the BG FIFO, and one pixel per dot is mapped through BGP into the framebuffer
 >   - SCX/SCY scrolling with wraparound, including fine scroll (the first `SCX % 8` pixels of each line are dropped)
 >   - both tile data modes (LCDC.4) and both BG tile maps (LCDC.3)
->   - LCDC.0 off blanks the background to white
-> - mode 3 timing of 172 + (SCX % 8) dots, including the discarded first tile fetch of each line
+>   - LCDC.0 off blanks the background and window to white
+> - the window: it starts when LY has matched WY earlier in the frame and the screen X reaches WX − 7, then restarts the fetcher on the window's tile map (LCDC.6)
+>   - its own line counter, which only advances on lines where the window was drawn
+>   - WX ≥ 167 or WY never reached keeps it hidden
+> - mode 3 timing of 172 + (SCX % 8) dots, including the discarded first tile fetch of each line, plus 6 dots on lines where the window starts
 >
-> Not written yet: the window, objects (OAM scan doesn't select objects yet), and the extra mode 3 dots that the window and objects add.
+> Not written yet: objects (OAM scan doesn't select objects yet) and the extra mode 3 dots they add. The window's edge cases for WX < 7 aren't handled.
 
 ## Goals
 
@@ -43,7 +46,8 @@ cppu/
 │   └── main.cpp
 ├── tests/               # CTest executables
 │   ├── CMakeLists.txt
-│   └── bg_render_test.cpp
+│   ├── bg_render_test.cpp
+│   └── window_render_test.cpp
 └── docs/                # notes and hardware references
 ```
 
@@ -200,6 +204,7 @@ ctest --test-dir build --output-on-failure
 | Test        | What it checks |
 |-------------|----------------|
 | `bg_render` | Renders a frame from a known tile pattern and compares every pixel against expected colors, across no scroll, fine scroll, wraparound and signed tile data. Also checks that mode 3 lasts 172 + (SCX % 8) dots. |
+| `window_render` | Renders frames with different BG and window tile maps and compares every pixel against a reference model, across window positions (including WX=7, WX=166, WX=167 and an unreached WY), swapped tile maps, and LCDC.5 turned off for some lines to check the window's line counter. Also checks that mode 3 is 6 dots longer on lines where the window starts. |
 
 ## Timing reference (DMG)
 
