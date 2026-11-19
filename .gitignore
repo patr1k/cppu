@@ -5,3 +5,10 @@ compile_commands.json
 *.gb
 *.sav
 .vscode/
+# tools/acid2: test ROMs, screenshots and reference images kept next to the
+# tool, and leftovers from re-applying the Peanut-GB patch
+*.gbc
+tools/acid2/*.bmp
+tools/acid2/*.png
+tools/acid2/third_party/**/*.orig
+tools/acid2/third_party/**/*.rej

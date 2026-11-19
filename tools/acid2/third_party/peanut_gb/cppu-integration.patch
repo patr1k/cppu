@@ -1,0 +1,161 @@
+--- a/peanut_gb.h
++++ b/peanut_gb.h
+@@ -89,6 +89,16 @@
+ # define ENABLE_LCD 1
+ #endif
+ 
++/* cppu: Hand the PPU to an external implementation supplied by the front-end:
++ * VRAM, OAM and LCD register (0xFF40-0xFF4B) accesses go to
++ * gb_ext_ppu_read()/gb_ext_ppu_write(), and gb_ext_ppu_tick() replaces
++ * Peanut-GB's LCD timing. The front-end is responsible for interrupts from
++ * the PPU, OAM DMA and setting gb_frame. Off by default (upstream behaviour).
++ * Set ENABLE_LCD to 0 alongside this. */
++#ifndef PEANUT_GB_EXTERNAL_PPU
++# define PEANUT_GB_EXTERNAL_PPU 0
++#endif
++
+ /* Enable 16 bit colour palette. If disabled, only four colour shades are set in
+  * pixel data. */
+ #ifndef PEANUT_GB_12_COLOUR
+@@ -741,6 +751,15 @@
+ 	} direct;
+ };
+ 
++#if PEANUT_GB_EXTERNAL_PPU
++/* cppu: Provided by the front-end when PEANUT_GB_EXTERNAL_PPU is set.
++ * addr is the full bus address. tick is called after each instruction with
++ * the number of T-cycles (dots) it took. */
++uint8_t gb_ext_ppu_read(struct gb_s *gb, uint_fast16_t addr);
++void gb_ext_ppu_write(struct gb_s *gb, uint_fast16_t addr, uint8_t val);
++void gb_ext_ppu_tick(struct gb_s *gb, uint_fast16_t cycles);
++#endif
++
+ #ifndef PEANUT_GB_HEADER_ONLY
+ 
+ #define IO_JOYP	0x00
+@@ -810,7 +829,12 @@
+ 
+ 	case 0x8:
+ 	case 0x9:
++#if PEANUT_GB_EXTERNAL_PPU
++		/* cppu: VRAM belongs to the external PPU. */
++		return gb_ext_ppu_read(gb, addr);
++#else
+ 		return gb->vram[addr - VRAM_ADDR];
++#endif
+ 
+ 	case 0xA:
+ 	case 0xB:
+@@ -850,12 +874,23 @@
+ 			return gb->wram[addr - ECHO_ADDR];
+ 
+ 		if(addr < UNUSED_ADDR)
++#if PEANUT_GB_EXTERNAL_PPU
++			/* cppu: OAM belongs to the external PPU. */
++			return gb_ext_ppu_read(gb, addr);
++#else
+ 			return gb->oam[addr - OAM_ADDR];
++#endif
+ 
+ 		/* Unusable memory area. Reading from this area returns 0xFF.*/
+ 		if(addr < IO_ADDR)
+ 			return 0xFF;
+ 
++#if PEANUT_GB_EXTERNAL_PPU
++		/* cppu: LCD registers belong to the external PPU. */
++		if(addr >= 0xFF40 && addr <= 0xFF4B)
++			return gb_ext_ppu_read(gb, addr);
++#endif
++
+ 		/* APU registers. */
+ 		if((addr >= 0xFF10) && (addr <= 0xFF3F))
+ 		{
+@@ -992,7 +1027,12 @@
+ 
+ 	case 0x8:
+ 	case 0x9:
++#if PEANUT_GB_EXTERNAL_PPU
++		/* cppu: VRAM belongs to the external PPU. */
++		gb_ext_ppu_write(gb, addr, val);
++#else
+ 		gb->vram[addr - VRAM_ADDR] = val;
++#endif
+ 		return;
+ 
+ 	case 0xA:
+@@ -1056,7 +1096,12 @@
+ 
+ 		if(addr < UNUSED_ADDR)
+ 		{
++#if PEANUT_GB_EXTERNAL_PPU
++			/* cppu: OAM belongs to the external PPU. */
++			gb_ext_ppu_write(gb, addr, val);
++#else
+ 			gb->oam[addr - OAM_ADDR] = val;
++#endif
+ 			return;
+ 		}
+ 
+@@ -1080,6 +1125,16 @@
+ 			return;
+ 		}
+ 
++#if PEANUT_GB_EXTERNAL_PPU
++		/* cppu: LCD registers, including DMA (0xFF46), belong to the
++		 * external PPU. The front-end runs the OAM DMA transfer. */
++		if(addr >= 0xFF40 && addr <= 0xFF4B)
++		{
++			gb_ext_ppu_write(gb, addr, val);
++			return;
++		}
++#endif
++
+ 		/* IO and Interrupts. */
+ 		switch(PEANUT_GB_GET_LSB16(addr))
+ 		{
+@@ -2493,6 +2548,13 @@
+ 				halt_cycles = tac_cycles;
+ 		}
+ 
++#if PEANUT_GB_EXTERNAL_PPU
++		/* cppu: Peanut-GB's LCD state isn't used, so it can't predict
++		 * the next LCD event. Step 4 cycles at a time instead, so the
++		 * external PPU's interrupts (e.g. LY=LYC) wake HALT on time. */
++		if(halt_cycles > 4)
++			halt_cycles = 4;
++#else
+ 		if((gb->hram_io[IO_LCDC] & LCDC_ENABLE))
+ 		{
+ 			int lcd_cycles;
+@@ -2521,6 +2583,7 @@
+ 			if(lcd_cycles < halt_cycles)
+ 				halt_cycles = lcd_cycles;
+ 		}
++#endif
+ 
+ 		/* Some halt cycles may already be very high, so make sure we
+ 		 * don't underflow here. */
+@@ -3401,6 +3464,15 @@
+ 			}
+ 		}
+ 
++#if PEANUT_GB_EXTERNAL_PPU
++		/* cppu: The external PPU does all LCD timing, raises its
++		 * interrupts in IF and sets gb_frame. */
++		gb_ext_ppu_tick(gb, inst_cycles);
++
++		/* If halted forever, then return on a new frame. */
++		if(gb->gb_frame && gb->gb_halt && !gb->hram_io[IO_IE])
++			break;
++#else
+ 		/* If LCD is off, don't update LCD state or increase the LCD
+ 		 * ticks. Instead, keep track of the amount of time that is
+ 		 * being passed. */
+@@ -3525,6 +3597,7 @@
+ 			if (gb->counter.lcd_count < LCD_MODE3_LCD_DRAW_MIN_DURATION)
+ 				inst_cycles = LCD_MODE3_LCD_DRAW_MIN_DURATION - gb->counter.lcd_count;
+ 		}
++#endif /* PEANUT_GB_EXTERNAL_PPU */
+ 	} while(gb->gb_halt && (gb->hram_io[IO_IF] & gb->hram_io[IO_IE]) == 0);
+ 	/* If halted, loop until an interrupt occurs. */
+ }

@@ -8,7 +8,7 @@ cppu emulates only the PPU, not a whole Game Boy. It builds as a library that yo
 
 A small SDL2 frontend is included for viewing the output while developing. It runs a demo scene that exercises the background, window and objects; see [Frontend demo](#frontend-demo).
 
-> **Status:** Stable. Working and validated:
+> **Status:** Stable. cppu passes [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) with an exact match of the reference image (see [Testing with dmg-acid2](#testing-with-dmg-acid2)). Working and validated:
 >
 > - the memory and register interface
 > - the mode timing, with LY advancing through OAM scan → drawing → HBlank on each visible line and VBlank on lines 144–153
@@ -58,7 +58,8 @@ cppu/
 │   ├── window_render_test.cpp
 │   ├── object_render_test.cpp
 │   └── access_test.cpp
-└── docs/                # notes and hardware references
+├── tools/acid2/         # dmg-acid2 test host: vendored Peanut-GB with cppu as its PPU
+└── docs/                # notes, screenshots and hardware references
 ```
 
 ## Building
@@ -79,6 +80,7 @@ ctest --test-dir build --output-on-failure   # run the tests
 |---------------------------|-------------------------|--------------------------------------|
 | `CPPU_BUILD_FRONTEND`     | `ON` when top-level     | Build the SDL2 frontend              |
 | `CPPU_BUILD_TESTS`        | `ON` when top-level     | Build the tests                      |
+| `CPPU_BUILD_ACID2`        | `OFF`                   | Build the dmg-acid2 test host (needs SDL2) |
 | `CPPU_WARNINGS_AS_ERRORS` | `OFF`                   | Treat compiler warnings as errors    |
 
 ## Frontend demo
@@ -311,6 +313,22 @@ ctest --test-dir build --output-on-failure
 | `object_render` (timing cases) | Cases aimed at object timing: one object at each position p = 0–7 within a BG tile, with SCX = 0 and SCX = 3 (one row of the 6–11-dot table per line); two objects in the same BG tile, where only the first pays the extra wait; and objects at X = 0 costing 11 dots with a nonzero SCX. |
 | `access` | CPU access locking: VRAM and OAM reads/writes with the LCD off and in each of modes 0–3 (VRAM locked in mode 3, OAM in modes 2–3, reads return 0xFF, writes ignored). Also checks that `write_oam_dma()` writes OAM even in modes 2–3, and that the DMA register reads back its value. |
 
+## Testing with dmg-acid2
+
+![cppu's dmg-acid2 output (left) next to the reference image (right)](docs/acid2-compare.png)
+
+[dmg-acid2](https://github.com/mattcurrie/dmg-acid2) is a test ROM that draws a face using most of the PPU's features (tile maps and data areas, the window and its line counter, object size, flips, palettes, priority and the 10-per-line limit). Each mistake breaks a recognizable part of the face. cppu's output matches the reference image exactly.
+
+Running a ROM needs a CPU, so [`tools/acid2/`](tools/acid2/) plugs cppu into [Peanut-GB](https://github.com/deltabeard/Peanut-GB), a small C99 emulator vendored with a patch that hands its PPU over to cppu. It's off by default:
+
+```sh
+cmake -S . -B build -DCPPU_BUILD_ACID2=ON
+cmake --build build --target cppu_acid2
+./build/tools/acid2/cppu_acid2 path/to/dmg-acid2.gb
+```
+
+Get the ROM from the [dmg-acid2 releases](https://github.com/mattcurrie/dmg-acid2/releases). See [tools/acid2/README.md](tools/acid2/README.md) for how the host works, the Peanut-GB patch, a headless screenshot mode, and its limitations.
+
 ## Timing reference (DMG)
 
 | Quantity          | Value                         |
@@ -330,3 +348,4 @@ ctest --test-dir build --output-on-failure
 - [The Ultimate Game Boy Talk (33c3)](https://www.youtube.com/watch?v=HyzD8pNlpwI): a great overview of the PPU's FIFO
 - [GBEDG: PPU](https://hacktix.github.io/GBEDG/ppu/): an emulator developer's guide to the PPU
 - [dmg-acid2](https://github.com/mattcurrie/dmg-acid2): a PPU accuracy test ROM
+- [Peanut-GB](https://github.com/deltabeard/Peanut-GB): the single-header emulator used to run dmg-acid2
