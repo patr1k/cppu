@@ -5,7 +5,7 @@ namespace cppu {
 
 struct Pixel {
     std::uint8_t color      = 0;
-    std::uint8_t palette    = 0;
+    bool palette            = false;
     bool bg_priority        = false;
 };
 

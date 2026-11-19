@@ -13,3 +13,6 @@ add_test(NAME bg_render COMMAND cppu_bg_render_test)
 
 cppu_add_test(cppu_window_render_test window_render_test.cpp)
 add_test(NAME window_render COMMAND cppu_window_render_test)
+
+cppu_add_test(cppu_object_render_test object_render_test.cpp)
+add_test(NAME object_render COMMAND cppu_object_render_test)

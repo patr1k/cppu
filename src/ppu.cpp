@@ -51,7 +51,7 @@ void PPU::set_mode(Mode mode) {
 
     switch (mode) {
         case Mode::OamScan:
-            // TODO: clear the per-line object list
+            line_obj_count_ = 0;
             if (ly_ == 0) {
                 wy_triggered_ = false;
                 wnd_line_ = 0;
@@ -79,6 +79,9 @@ void PPU::set_mode(Mode mode) {
             tile_hi_ = 0;
             discard_ = scx_ % 8;
             first_fetch_ = true;
+
+            obj_fetched_ = 0;
+            obj_fetch_idx_ = -1;
             break;
 
         case Mode::HBlank:
@@ -90,17 +93,76 @@ void PPU::set_mode(Mode mode) {
 }
 
 void PPU::tick_oam_scan() {
-    // TODO: every 2 dots, check one OAM entry (40 total) against LY and
-    // collect up to 10 objects for this line.
+    std::uint16_t idx = dots_ / 2;
+    std::uint8_t height = lcdc_obj_size() ? 16 : 8;
+
+    if (dots_ & 1) {
+        std::uint8_t y = oam_[idx * 4];
+        std::uint16_t line = static_cast<std::uint16_t>(ly_ + 16);
+        std::uint16_t y_height = static_cast<std::uint16_t>(y + height);
+        if (
+            line >= y 
+            && line < y_height 
+            && line_obj_count_ < kMaxObjectsPerLine
+        ) {
+            std::uint8_t x = oam_[idx * 4 + 1];
+            std::uint8_t tile = oam_[idx * 4 + 2];
+            std::uint8_t attrs = oam_[idx * 4 + 3];
+            line_obj_list_[line_obj_count_] = Object{y, x, tile, attrs};
+            ++line_obj_count_;
+        }
+    }
+}
+
+bool PPU::pixel_expected() const {
+    return (!bg_fifo_.empty() || fetch_step_ == PixelFetchStep::Push);
+}
+
+std::uint8_t PPU::apply_palette(std::uint8_t palette, std::uint8_t color) const {
+    return (palette >> (color * 2)) & 3;
 }
 
 void PPU::tick_drawing() {
+    if (obj_fetch_idx_ >= 0) {
+        // advance the fetch; if it's finished, do the reads + merge, mark fetched, clear "in progress"
+        ++obj_fetch_dots_;
+        if (obj_fetch_dots_ < 6) return;
+
+        // 6th dot: do the fetch and merge
+        auto obj = line_obj_list_[obj_fetch_idx_];
+        std::uint8_t height = lcdc_obj_size() ? 16 : 8;
+        std::uint8_t row = static_cast<std::uint8_t>(ly_ + 16 - obj.y);
+        if (obj.attrs & oam::kYFlip) row = static_cast<std::uint8_t>(height - 1 - row);
+        std::uint8_t tile = height == 16 ? (obj.tile & 0xFE) : obj.tile;
+        std::uint16_t addr = static_cast<std::uint16_t>(tile * 16 + row * 2);
+        std::uint8_t lo = vram_[addr + 0];
+        std::uint8_t hi = vram_[addr + 1];
+        
+        while (obj_fifo_.size() < 8) obj_fifo_.push(Pixel{});
+
+        std::uint8_t skip = static_cast<std::uint8_t>(mode3_x_ + 8 - obj.x);
+        for (std::uint8_t j = skip; j < 8; j++) {
+            std::uint8_t bit = (obj.attrs & oam::kXFlip) ? j : 7 - j;
+            std::uint8_t color = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+            if (obj_fifo_.at(j - skip).color == 0 && color != 0) {
+                obj_fifo_.at(j - skip) = Pixel{
+                    color, 
+                    (obj.attrs & oam::kPalette) != 0, 
+                    (obj.attrs & oam::kBgPriority) != 0
+                };
+            }
+        }
+        obj_fetched_ |= 1 << obj_fetch_idx_;
+        obj_fetch_idx_ = -1;
+        return;
+    }
+
     if (
         !in_wnd_ 
         && lcdc_wnd_enable() 
         && wy_triggered_ 
         && static_cast<std::uint16_t>(mode3_x_+7) == wx_ 
-        && (!bg_fifo_.empty() || fetch_step_ == PixelFetchStep::Push)
+        && pixel_expected()
     ) {
         // drawing a window
         in_wnd_ = true;
@@ -109,6 +171,18 @@ void PPU::tick_drawing() {
         fetch_dots_ = 0;
         fetch_x_ = 0;
         discard_ = 0;
+    }
+
+    if (lcdc_obj_enable() && discard_ == 0 && pixel_expected()) {
+        for (std::uint8_t i = 0; i < line_obj_count_; i++) {
+            if (((obj_fetched_ >> i) & 1) == 0) {
+                if (line_obj_list_[i].x <= mode3_x_ + 8) {
+                    obj_fetch_idx_ = i;
+                    obj_fetch_dots_ = 1;
+                    return;
+                }
+            }
+        }
     }
 
     // FIFO INPUT SIDE
@@ -192,7 +266,7 @@ void PPU::tick_drawing() {
 
     // FIFO OUTPUT SIDE
     if (bg_fifo_.size() > 0) {
-        auto pixel = bg_fifo_.pop();
+        auto bg_pixel = bg_fifo_.pop();
 
         // Drop the first scx % 8 pixels for fine scroll
         if (discard_ > 0) {
@@ -200,13 +274,27 @@ void PPU::tick_drawing() {
             return;
         }
 
-        if (!lcdc_bg_wnd_enable()) {
-            // If the background/window is disabled, we draw white (color 0)
-            framebuffer_[ly_ * kScreenWidth + mode3_x_] = 0;
-        } else {
-            // Map the pixel color through the BGP register to get the final shade
-            framebuffer_[ly_ * kScreenWidth + mode3_x_] = static_cast<std::uint8_t>((bgp_ & (3 << (pixel.color * 2))) >> (pixel.color * 2));
+        Pixel obj_pixel{};
+        if (!obj_fifo_.empty()) {
+            obj_pixel = obj_fifo_.pop();
         }
+
+        std::uint8_t shade;
+        if (obj_pixel.color == 0) {
+            if (!lcdc_bg_wnd_enable()) {
+                shade = 0;
+            } else {
+                shade = apply_palette(bgp_, bg_pixel.color);
+            }
+        } else {
+            if (obj_pixel.bg_priority && bg_pixel.color > 0 && lcdc_bg_wnd_enable()) {
+                shade = apply_palette(bgp_, bg_pixel.color);
+            } else {
+                shade = apply_palette(obj_pixel.palette ? obp1_ : obp0_, obj_pixel.color);
+            }
+        }
+        framebuffer_[ly_ * kScreenWidth + mode3_x_] = shade;
+
         ++mode3_x_;
     }
 }

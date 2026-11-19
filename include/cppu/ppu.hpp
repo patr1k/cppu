@@ -42,6 +42,13 @@ namespace stat {
     inline constexpr std::uint8_t kModeMask          = 0x03; // read-only (2-bits)
 }
 
+namespace oam {
+    inline constexpr std::uint8_t kBgPriority = 0x80;
+    inline constexpr std::uint8_t kYFlip = 0x40;
+    inline constexpr std::uint8_t kXFlip = 0x20;
+    inline constexpr std::uint8_t kPalette = 0x10;
+}
+
 inline constexpr int kScreenWidth  = 160;
 inline constexpr int kScreenHeight = 144;
 
@@ -54,6 +61,7 @@ inline constexpr int kDotsPerFrame  = kDotsPerLine * kLinesPerFrame;
 // Mode 2 (OAM scan) always lasts 80 dots. Mode 3 (drawing) lasts 172-289
 // dots depending on SCX, the window and objects; HBlank pads out the rest.
 inline constexpr int kOamScanDots = 80;
+inline constexpr int kMaxObjectsPerLine = 10;
 
 inline constexpr std::uint8_t kIntVBlank = 0x01;
 inline constexpr std::uint8_t kIntStat   = 0x02;
@@ -119,6 +127,10 @@ private:
         GetTileDataLow,
         GetTileDataHigh,
         Push
+    };
+
+    struct Object {
+        std::uint8_t y, x, tile, attrs;
     };
 
     Mode mode() const { return static_cast<Mode>(stat_ & stat::kModeMask); }
@@ -197,6 +209,16 @@ private:
     bool wy_triggered_ = false;
     bool in_wnd_ = false;
     std::uint8_t wnd_line_ = 0;
+
+    bool pixel_expected() const;
+    std::uint8_t apply_palette(std::uint8_t palette, std::uint8_t color) const;
+
+    std::array<Object, kMaxObjectsPerLine> line_obj_list_{};
+    std::uint8_t line_obj_count_ = 0;
+
+    std::int8_t obj_fetch_idx_ = -1;
+    std::uint8_t obj_fetch_dots_ = 0;
+    std::uint16_t obj_fetched_ = 0;
 };
 
 } // namespace cppu
