@@ -121,30 +121,72 @@ private:
         Drawing = 3,
     };
 
-    // Steps of the mode 3 pixel fetcher
-    enum class PixelFetchStep : std::uint8_t {
+    // Steps of the BG/window tile fetcher. The first three take 2 dots each;
+    // Push waits until the BG FIFO is empty.
+    enum class BgFetchStep : std::uint8_t {
         GetTile,
         GetTileDataLow,
         GetTileDataHigh,
         Push
     };
 
+    // An object selected by OAM scan: a copy of its 4 OAM bytes, unmodified.
     struct Object {
-        std::uint8_t y, x, tile, attrs;
+        std::uint8_t y;     // screen Y + kObjYOffset
+        std::uint8_t x;     // screen X + kObjXOffset
+        std::uint8_t tile;
+        std::uint8_t attrs; // oam::k* bits
     };
 
+    // OAM positions are offset so objects can sit partly off the top/left.
+    static constexpr int kObjYOffset = 16;
+    static constexpr int kObjXOffset = 8;
+
+    // Tile map offsets in VRAM, selected by LCDC.3 (BG) and LCDC.6 (window).
+    static constexpr std::uint16_t kTileMap0 = 0x1800;
+    static constexpr std::uint16_t kTileMap1 = 0x1C00;
+
+    // --- Mode and line control ---------------------------------------------
     Mode mode() const { return static_cast<Mode>(stat_ & stat::kModeMask); }
     void set_mode(Mode mode);
-
-    // Per-dot work for each mode.
-    void tick_oam_scan();
-    void tick_drawing();
 
     // Called after the last dot of a line: advances LY, picks the next mode.
     void end_line();
 
     void update_stat_line();
 
+    // --- Mode 2: OAM scan ----------------------------------------------------
+    void tick_oam_scan();
+    int obj_height() const { return lcdc_obj_size() ? 16 : 8; }
+
+    // --- Mode 3: drawing (tick_drawing runs the steps below each dot) --------
+    void tick_drawing();
+
+    // Object fetch: stalls the BG fetcher and output for 6-11 dots.
+    void tick_object_fetch();
+    bool try_start_object_fetch();
+    std::uint8_t obj_fetch_length(const Object& obj);
+    void merge_object_row(const Object& obj);
+
+    // Window: restarts the BG fetcher on the window's tile map.
+    bool window_starts_here() const;
+    void start_window();
+
+    // BG/window fetcher: fills the BG FIFO one tile row at a time.
+    void tick_bg_fetcher();
+    std::uint16_t bg_tile_row_addr() const;
+    void push_bg_row();
+
+    // Pixel output: pops one pixel per dot and writes it to the framebuffer.
+    void output_pixel();
+    std::uint8_t mix_pixel(const Pixel& bg, const Pixel& obj) const;
+    std::uint8_t apply_palette(std::uint8_t palette, std::uint8_t color) const;
+
+    // True if a pixel will be output on this dot: the BG FIFO has one, or
+    // the fetcher is about to push a tile row into it.
+    bool pixel_expected() const;
+
+    // --- State ---------------------------------------------------------------
     std::array<std::uint8_t, kScreenWidth * kScreenHeight> framebuffer_{};
 
     // VRAM
@@ -193,35 +235,34 @@ private:
     // True once per frame (at the start of VBlank)
     bool frame_ready_ = false;
 
-    // Pixel FIFOs for mode 3 drawing. The fetcher fills these with pixels to be drawn.
-    PixelFifo obj_fifo_{};
+    // --- Mode 3 pixel FIFOs. Slot i of each is screen pixel mode3_x_ + i.
     PixelFifo bg_fifo_{};
+    PixelFifo obj_fifo_{};
 
-    PixelFetchStep fetch_step_ = PixelFetchStep::GetTile;
-    std::uint8_t fetch_dots_ = 0;
-    std::uint8_t fetch_x_ = 0;
-    std::uint16_t tile_addr_ = 0;
-    std::uint8_t tile_lo_ = 0;
-    std::uint8_t tile_hi_ = 0;
-    std::uint8_t discard_ = 0;
-    bool first_fetch_ = false;
+    // --- BG/window fetcher (reset at the start of each line's mode 3) ---
+    BgFetchStep bg_fetch_step_ = BgFetchStep::GetTile;
+    std::uint8_t bg_fetch_dots_ = 0;      // dots spent in the current step (0-1)
+    std::uint8_t bg_fetch_tile_x_ = 0;    // tile column being fetched, counted from the line start
+    std::uint16_t bg_tile_addr_ = 0;      // VRAM offset of the tile row being fetched
+    std::uint8_t bg_tile_lo_ = 0;         // its low bitplane byte
+    std::uint8_t bg_tile_hi_ = 0;         // its high bitplane byte
+    bool dummy_fetch_pending_ = false;    // the first fetch of each line is thrown away
+    std::uint8_t scx_discard_ = 0;        // BG pixels still to drop for fine scroll (SCX % 8)
 
-    bool wy_triggered_ = false;
-    bool in_wnd_ = false;
-    std::uint8_t wnd_line_ = 0;
+    // --- Window ---
+    bool wy_latched_ = false;             // LY has matched WY earlier this frame
+    bool in_wnd_ = false;                 // the fetcher is drawing the window on this line
+    std::uint8_t wnd_line_ = 0;           // window's own line counter (only counts lines it was drawn on)
 
-    bool pixel_expected() const;
-    std::uint8_t obj_fetch_length(const Object& obj);
-    std::uint8_t apply_palette(std::uint8_t palette, std::uint8_t color) const;
-
-    std::array<Object, kMaxObjectsPerLine> line_obj_list_{};
+    // --- Objects selected by OAM scan for the current line, in OAM order ---
+    std::array<Object, kMaxObjectsPerLine> line_objs_{};
     std::uint8_t line_obj_count_ = 0;
 
-    std::int8_t obj_fetch_idx_ = -1;
-    std::uint8_t obj_fetch_dots_ = 0;
-    std::uint16_t obj_fetched_ = 0;
-    // Total length in dots of the object fetch in progress (6-11).
-    std::uint8_t obj_fetch_len_ = 0;
+    // --- Object fetch ---
+    std::int8_t obj_fetch_idx_ = -1;      // index into line_objs_ being fetched; -1 = none
+    std::uint8_t obj_fetch_dots_ = 0;     // dots spent on it so far
+    std::uint8_t obj_fetch_len_ = 0;      // its total length (6-11 dots)
+    std::uint16_t obj_fetched_mask_ = 0;  // bit i set = line_objs_[i] already fetched
 
     // The BG/window tile that last charged an object the extra "wait for the
     // BG fetcher" dots, so later objects in the same tile only pay 6.
