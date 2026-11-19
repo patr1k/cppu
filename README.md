@@ -6,9 +6,9 @@ A standalone emulator for the **Game Boy (DMG) Picture Processing Unit**, writte
 
 cppu emulates only the PPU, not a whole Game Boy. It builds as a library that you can drop into a full Game Boy emulator or into a custom project that just needs Game Boy-style graphics. The PPU owns its VRAM, OAM and LCD registers. The host program drives the clock and connects those to its own memory map.
 
-A small SDL2 frontend is included for viewing the output while developing. It runs a demo scene: a scrolling background, a window status bar showing SCX/SCY, and bouncing ball objects (some using OBP1, some with the BG-priority bit so they pass behind the bricks). Arrow keys scroll, Space toggles auto-scroll, W slides the window in and out, O shows or hides objects, and Esc quits.
+A small SDL2 frontend is included for viewing the output while developing. It runs a demo scene that exercises the background, window and objects; see [Frontend demo](#frontend-demo).
 
-> **Status:** early development. Working so far:
+> **Status:** Stable. Working and validated:
 >
 > - the memory and register interface
 > - the mode timing, with LY advancing through OAM scan → drawing → HBlank on each visible line and VBlank on lines 144–153
@@ -80,6 +80,43 @@ ctest --test-dir build --output-on-failure   # run the tests
 | `CPPU_BUILD_FRONTEND`     | `ON` when top-level     | Build the SDL2 frontend              |
 | `CPPU_BUILD_TESTS`        | `ON` when top-level     | Build the tests                      |
 | `CPPU_WARNINGS_AS_ERRORS` | `OFF`                   | Treat compiler warnings as errors    |
+
+## Frontend demo
+
+![The frontend demo: a scrolling brick-and-grass background, smiley-face objects, and a window status bar showing SCX and SCY](docs/demo-img.png)
+
+The SDL2 frontend runs a small demo scene that uses everything the PPU draws:
+
+- **Background:** grass and brick blocks scrolled with SCX/SCY. It drifts right while bobbing up and down, wrapping around the 256×256 map.
+- **Window:** the status bar along the bottom, drawn from the second tile map. It stays fixed while the background scrolls and shows the live SCX/SCY values.
+- **Objects:** eight bouncing smiley faces. Every other one uses OBP1 (lighter), and every third has the BG-priority bit set, so it passes behind the bricks but in front of the grass.
+
+### Building and running
+
+The frontend needs SDL2 (`sudo apt install libsdl2-dev` on Debian/Ubuntu). It's built by default when cppu is the top-level project:
+
+```sh
+cmake -S . -B build
+cmake --build build --target cppu_frontend   # or just `cmake --build build` for everything
+./build/frontend/cppu_frontend
+```
+
+To build only the library and tests, without SDL2, configure with `-DCPPU_BUILD_FRONTEND=OFF`.
+
+### Controls
+
+| Key | Action |
+|---|---|
+| Arrow keys | Scroll the background (hold to keep scrolling) |
+| Space | Toggle automatic scrolling |
+| W | Slide the window out of view or back in (by moving WY) |
+| O | Show or hide objects (LCDC.1) |
+| Esc | Quit |
+
+### How it's put together
+
+- [`frontend/demo.cpp`](frontend/demo.cpp) sets up the scene using only the PPU's public interface, as a game would: tiles, tile maps and OAM through `write_vram` / `write_oam`, and the scroll, window, palette and LCDC registers through `write_register`. Tiles are written as 8×8 text art, so they're easy to edit.
+- [`frontend/main.cpp`](frontend/main.cpp) handles the SDL window and input. Each frame it calls the demo's `update()` during VBlank, because OAM and VRAM are locked while the PPU is drawing. Then it ticks the PPU to the next VBlank and shows the framebuffer with a DMG-style green palette.
 
 ## Using cppu in another project
 
